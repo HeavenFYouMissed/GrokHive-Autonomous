@@ -488,15 +488,18 @@ class MiniGrokSwarm:
                           on_verifier_token=None):
         """Run continuous autonomous research on a topic.
 
+        Uses a SINGLE scraper agent per round (no parallel agents)
+        to avoid multiple agents fighting over one browser/keyboard.
+
         Each round:
-          1. Swarm researches a sub-topic (opens browser, scrapes, etc.)
-          2. Verifier synthesises findings → saved to a file
-          3. Verifier also outputs 1-3 follow-up sub-topics
-          4. Next round picks the best follow-up and continues
+          1. One scraper agent opens browser, grabs raw page data
+          2. Lightweight verifier catalogs what was collected
+          3. NEXT topics extracted for the following round
 
         Files saved to output_dir:
-          round_01_<subtopic>.md, round_02_<subtopic>.md, ...
-          research_index.md — master index of all findings
+          raw_data_round_01.txt, raw_data_round_02.txt, ... (actual page text)
+          round_01_<subtopic>.md, round_02_<subtopic>.md, ... (catalog)
+          research_index.md — master index
 
         Returns dict with total_rounds, files_created, elapsed.
         """
@@ -506,6 +509,7 @@ class MiniGrokSwarm:
         files_created = []
         current_task = topic
         all_summaries = []
+        tools = TOOL_SCHEMAS
 
         for round_num in range(1, max_rounds + 1):
             if self._cancelled:
@@ -514,91 +518,158 @@ class MiniGrokSwarm:
             if on_round:
                 on_round(round_num, max_rounds, current_task)
 
-            # Build the raw-data collection file path for this round
+            # ── Single scraper agent (no parallel contention) ───
             raw_file = os.path.join(
                 output_dir,
                 f"raw_data_round_{round_num:02d}.txt",
             )
 
-            # Build the research prompt for this round
-            research_prompt = (
+            scraper_task = (
                 f"RESEARCH ROUND {round_num}/{max_rounds}\n"
                 f"MAIN TOPIC: {topic}\n"
                 f"CURRENT SUB-TASK: {current_task}\n\n"
                 "YOUR MISSION — RAW DATA COLLECTION:\n"
-                "1. Search Google for this topic\n"
-                "2. Visit 3-5 of the best links (research papers, articles, code repos, forums)\n"
-                "3. On EACH page:\n"
-                "   a) press_keys('ctrl,a') to select all text\n"
-                "   b) press_keys('ctrl,c') to copy\n"
-                "   c) get_clipboard() to retrieve the raw text\n"
-                "   d) append_file() to dump it into the data file with a SOURCE header\n"
-                "   e) close_browser_tab() when done\n"
-                "4. DO NOT summarise, rewrite, or paraphrase — paste RAW text only\n"
-                "5. NEVER visit guidedhacking.com\n\n"
-                f"APPEND ALL RAW DATA TO: {raw_file}\n"
-                "Format each page dump like:\n"
-                "═══ SOURCE: <page URL or title> ═══\n"
-                "<raw clipboard text here>\n\n"
-                "After collecting data, list what you found and suggest:\n"
+                "You are the ONLY agent. You have full control of the browser.\n\n"
+                "STEP-BY-STEP WORKFLOW (follow this exactly):\n"
+                "1. open_url('https://www.google.com/search?q=<your search query>')\n"
+                "2. wait(3)\n"
+                "3. ocr_screenshot() — read the search results to find good links\n"
+                "4. click(x, y) — click a promising search result\n"
+                "5. wait(3)\n"
+                "6. press_keys('ctrl,a') — select ALL text on the page\n"
+                "7. press_keys('ctrl,c') — copy it\n"
+                "8. get_clipboard() — retrieve the raw text\n"
+                "9. append_file(path, '═══ SOURCE: <url> ═══\\n' + raw_text + '\\n\\n')\n"
+                "10. close_browser_tab() — close this tab\n"
+                "11. REPEAT steps 4-10 for the next search result (visit 3-5 total pages)\n\n"
+                "CRITICAL RULES:\n"
+                "• Use append_file() — NOT write_file() — so you build up one file\n"
+                "• Paste the EXACT clipboard text — NEVER summarise or rewrite\n"
+                "• Use ocr_screenshot() ONLY for navigation (seeing links/buttons)\n"
+                "• Use get_clipboard() for data extraction (much better than OCR)\n"
+                "• ALWAYS close_browser_tab() after extracting each page\n"
+                "• NEVER visit guidedhacking.com\n\n"
+                f"APPEND ALL RAW DATA TO: {raw_file}\n\n"
+                "After visiting all pages, end with a brief list of what you collected\n"
+                "and suggest follow-up topics:\n"
                 "NEXT: <follow-up topic 1>\n"
                 "NEXT: <follow-up topic 2>\n"
                 "NEXT: <follow-up topic 3>\n"
             )
 
-            # Verifier prompt for research mode — catalog only, don't rewrite
-            research_verifier = (
-                "You are the Research Verifier. Respond ONLY in English.\n\n"
-                "The agents below collected RAW data from websites and saved it "
-                "to files. Your job is ONLY to:\n\n"
-                "1. List every URL / source the agents visited\n"
-                "2. Briefly note what type of content was found at each source "
-                "   (e.g. 'academic paper on ML anti-cheat', 'forum thread with code examples')\n"
-                "3. Note any files that were saved and their paths\n"
-                "4. Flag if any agent failed or found nothing useful\n\n"
-                "DO NOT rewrite, summarise, or paraphrase any of the collected data.\n"
-                "The raw data is already saved to files — your job is just to catalog it.\n\n"
-                "At the end, suggest 1-3 follow-up topics to research next.\n"
-                "Format: NEXT: <topic>\n"
-            )
+            if on_agent_status:
+                on_agent_status("🔍 Scraper", "⏳ Browsing...")
 
-            # Run one full swarm cycle
-            result = self.run(
-                task=research_prompt,
-                on_agent_status=on_agent_status,
-                on_agent_done=on_agent_done,
-                on_verifier_token=on_verifier_token,
-                verifier_system=research_verifier,
-            )
+            def _scraper_status(msg):
+                if on_agent_status:
+                    on_agent_status("🔍 Scraper", msg)
 
-            if not result["success"]:
+            key = self.api_keys[round_num % len(self.api_keys)]
+
+            try:
+                scraper_output = _run_agent(
+                    role_name="🔍 Scraper",
+                    role_focus="Raw data collection — browse, copy, save verbatim",
+                    task=scraper_task,
+                    context="",
+                    model=self.model,
+                    api_key=key,
+                    tools=tools,
+                    on_status=_scraper_status,
+                    max_tool_rounds=25,
+                )
+            except Exception as e:
+                scraper_output = f"[Scraper ERROR] {e}"
+
+            if on_agent_status:
+                on_agent_status("🔍 Scraper", "✅ Done")
+            if on_agent_done:
+                on_agent_done("🔍 Scraper", scraper_output)
+
+            if self._cancelled:
                 break
 
-            # Save round output
+            # ── Lightweight verifier pass (catalog only, no browser) ──
+            if on_agent_status:
+                on_agent_status("✅ Verifier", "⏳ Cataloging...")
+
+            # Check what was actually saved
+            raw_size = 0
+            if os.path.exists(raw_file):
+                raw_size = os.path.getsize(raw_file)
+
+            verifier_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the Research Catalog Agent. Respond ONLY in English.\n\n"
+                        "A scraper agent just browsed the web and saved raw page text.\n"
+                        "Your ONLY job is to produce a brief catalog:\n\n"
+                        "1. List the URLs / sources that were scraped\n"
+                        "2. One line per source: what kind of content (paper, repo, forum, etc.)\n"
+                        "3. Note the raw data file path and size\n"
+                        "4. Flag if scraping failed or data is empty\n\n"
+                        "DO NOT rewrite or summarise the raw data. It's already saved.\n\n"
+                        "End with 1-3 follow-up topics:\n"
+                        "NEXT: <topic>\n"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"TOPIC: {current_task}\n\n"
+                        f"SCRAPER REPORT:\n{scraper_output}\n\n"
+                        f"RAW DATA FILE: {raw_file} ({raw_size:,} bytes)\n"
+                    ),
+                },
+            ]
+
+            if self.verifier_backend == "ollama":
+                result = _call_ollama(
+                    verifier_messages, self.ollama_model,
+                    self.ollama_url,
+                    stream=True, on_token=on_verifier_token,
+                )
+            else:
+                result = _call_grok(
+                    verifier_messages, self.model, self.api_keys[0],
+                    stream=True, on_token=on_verifier_token,
+                )
+
+            if on_agent_status:
+                on_agent_status("✅ Verifier", "✅ Done")
+
+            output_text = result.get("reply", "") if result["success"] else scraper_output
+            # Strip leaked chain-of-thought tags
+            output_text = re.sub(r'</?think>', '', output_text).strip()
+
+            # Save round catalog
             safe_name = re.sub(r'[^\w\s-]', '', current_task)[:50].strip()
             safe_name = re.sub(r'\s+', '_', safe_name)
             filename = f"round_{round_num:02d}_{safe_name}.md"
             filepath = os.path.join(output_dir, filename)
 
-            output_text = result.get("final_output", "")
-            # Strip leaked chain-of-thought tags
-            output_text = re.sub(r'</think>', '', output_text).strip()
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(f"# Research Round {round_num}: {current_task}\n\n")
                 f.write(output_text)
             files_created.append(filepath)
+
+            # Count the raw data file too
+            if os.path.exists(raw_file) and raw_size > 0:
+                files_created.append(raw_file)
+
             all_summaries.append(
                 f"## Round {round_num}: {current_task}\n\n"
+                f"Raw data: {raw_size:,} bytes\n"
                 f"{output_text[:500]}...\n"
             )
 
-            # Extract next sub-topic from verifier output
+            # Extract next sub-topic
             next_topics = re.findall(
                 r'NEXT:\s*(.+)', output_text, re.IGNORECASE)
             if next_topics:
                 current_task = next_topics[0].strip()
             else:
-                # No follow-ups suggested — generate one from Grok
                 current_task = f"{topic} — deeper dive round {round_num + 1}"
 
             # Reset verifier token flag for next round
@@ -610,7 +681,7 @@ class MiniGrokSwarm:
             f.write(f"# Research Index: {topic}\n\n")
             f.write(f"Total rounds: {len(files_created)}\n")
             f.write(f"Elapsed: {time.time() - t0:.0f}s\n\n")
-            for i, fp in enumerate(files_created, 1):
+            for fp in files_created:
                 name = os.path.basename(fp)
                 f.write(f"- [{name}]({name})\n")
             f.write("\n\n---\n\n")
@@ -619,7 +690,8 @@ class MiniGrokSwarm:
 
         return {
             "success": not self._cancelled,
-            "total_rounds": len(files_created) - 1,  # minus index
+            "total_rounds": len([f for f in files_created
+                                 if os.path.basename(f).startswith("round_")]),
             "files_created": files_created,
             "elapsed": time.time() - t0,
         }

@@ -48,35 +48,69 @@ class ActionButton(ctk.CTkButton):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class Tooltip:
-    """Hover tooltip for any widget."""
+    """Hover tooltip for any widget — with show delay to prevent flicker."""
+
+    _DELAY_MS = 450  # ms before tooltip appears
 
     def __init__(self, widget, text):
         self.widget = widget
         self.text = text
         self._tip = None
-        widget.bind("<Enter>", self._show)
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule_show)
         widget.bind("<Leave>", self._hide)
+        widget.bind("<Button-1>", self._hide)
 
-    def _show(self, _event):
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self._tip = ctk.CTkToplevel(self.widget)
-        self._tip.wm_overrideredirect(True)
-        self._tip.wm_geometry(f"+{x}+{y}")
-        self._tip.attributes("-topmost", True)
-        label = ctk.CTkLabel(
-            self._tip, text=self.text,
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_card"],
-            text_color=COLORS["text_secondary"],
-            corner_radius=6,
-        )
-        label.pack(padx=8, pady=5)
+    def _schedule_show(self, _event):
+        self._cancel()
+        self._after_id = self.widget.after(self._DELAY_MS, self._show)
 
-    def _hide(self, _event):
-        if self._tip:
-            self._tip.destroy()
-            self._tip = None
+    def _show(self):
+        self._cancel()
+        self._destroy_tip()
+        try:
+            if not self.widget.winfo_exists():
+                return
+            x = self.widget.winfo_rootx() + 20
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+            self._tip = ctk.CTkToplevel(self.widget)
+            self._tip.withdraw()
+            self._tip.wm_overrideredirect(True)
+            self._tip.configure(fg_color=COLORS["bg_card"])
+            self._tip.wm_geometry(f"+{x}+{y}")
+            self._tip.attributes("-topmost", True)
+            label = ctk.CTkLabel(
+                self._tip, text=self.text,
+                font=(FONT_FAMILY, FONT_SIZES["small"]),
+                fg_color=COLORS["bg_card"],
+                text_color=COLORS["text_secondary"],
+                corner_radius=6,
+            )
+            label.pack(padx=8, pady=5)
+            self._tip.deiconify()
+        except Exception:
+            self._destroy_tip()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        self._destroy_tip()
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _destroy_tip(self):
+        tip = self._tip
+        self._tip = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -16,13 +16,16 @@ GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODELS_URL = "https://api.x.ai/v1/models"
 
 GROK_MODELS = [
+    "grok-4-0709",
+    "grok-4-fast-reasoning",
+    "grok-4-fast-non-reasoning",
+    "grok-4-1-fast-reasoning",
+    "grok-4-1-fast-non-reasoning",
     "grok-3",
     "grok-3-mini",
-    "grok-3-fast",
-    "grok-2-latest",
-    "grok-beta",
+    "grok-code-fast-1",
 ]
-DEFAULT_MODEL = "grok-3"
+DEFAULT_MODEL = "grok-4-0709"
 
 # ── Agent Roles (tiered) ───────────────────────────────────
 AGENT_ROLES = {

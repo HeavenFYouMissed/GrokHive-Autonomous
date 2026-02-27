@@ -259,6 +259,11 @@ class SwarmApp(ctk.CTk):
             command=self._run_swarm, style="success", width=140)
         self.btn_run.pack(pady=(0, 4))
 
+        self.btn_research = ActionButton(
+            btn_col, text="🔬 Research",
+            command=self._run_research, style="primary", width=140)
+        self.btn_research.pack(pady=(0, 4))
+
         self.btn_stop = ActionButton(
             btn_col, text="⏹ Stop",
             command=self._stop_swarm, style="danger", width=140)
@@ -1157,6 +1162,7 @@ class SwarmApp(ctk.CTk):
         SwarmTools.safety_level = self._get_safety_key()
         self._running = True
         self.btn_run.configure(state="disabled")
+        self.btn_research.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self._first_verifier_token = True
 
@@ -1183,6 +1189,7 @@ class SwarmApp(ctk.CTk):
             def _done():
                 self._running = False
                 self.btn_run.configure(state="normal")
+                self.btn_research.configure(state="normal")
                 self.btn_stop.configure(state="disabled")
                 self._swarm = None
 
@@ -1215,6 +1222,125 @@ class SwarmApp(ctk.CTk):
         if self._swarm:
             self._swarm.cancel()
             self._append_output("\n⏹ Stopping swarm...\n", tag="system")
+
+    def _run_research(self):
+        """Launch autonomous research loop — overnight browser scraping."""
+        if self._running:
+            return
+
+        topic = self.task_input.get("1.0", "end-1c").strip()
+        if not topic:
+            return
+
+        keys = self._get_active_keys()
+        if not keys:
+            self._append_output(
+                "\n⚠️  No API keys! Go to the 🔑 API Keys tab "
+                "and add at least one.\n",
+                tag="error",
+            )
+            self._switch_page("keys")
+            return
+
+        self._switch_page("swarm")
+        self.task_input.delete("1.0", "end")
+
+        # Research output folder
+        output_dir = os.path.join(
+            os.path.expanduser("~"), "Documents", "GrokHive_Research",
+            topic[:40].replace(" ", "_").replace("/", "_"),
+        )
+
+        tier_key = self._get_tier_key()
+        model = self.model_menu.get()
+        max_rounds = int(self._settings.get("max_tool_rounds", 5)) * 4
+
+        self._append_output(f"\n{'━' * 65}\n", tag="system")
+        self._append_output(
+            f"🔬 RESEARCH MODE: {topic}\n", tag="system")
+        self._append_output(
+            f"📁 Output: {output_dir}\n", tag="system")
+        self._append_output(
+            f"🔄 Max rounds: {max_rounds}  •  Model: {model}  •  "
+            f"Agents: {tier_key}\n", tag="system")
+        self._append_output(
+            f"⏹ Press Stop to end early — all findings saved.\n",
+            tag="system")
+        self._append_output(f"{'━' * 65}\n\n", tag="system")
+
+        for dot in self._agent_dots.values():
+            dot.configure(text_color=COLORS["text_muted"])
+
+        SwarmTools.safety_level = self._get_safety_key()
+        self._running = True
+        self.btn_run.configure(state="disabled")
+        self.btn_research.configure(state="disabled")
+        self.btn_stop.configure(state="normal")
+        self._first_verifier_token = True
+
+        self._swarm = MiniGrokSwarm(
+            api_keys=keys,
+            model=model,
+            tier=tier_key,
+            max_tool_rounds=int(self.tool_rounds_slider.get()),
+            timeout=int(self.timeout_slider.get()),
+        )
+        swarm = self._swarm
+
+        def _on_round(num, total, subtopic):
+            def _ui():
+                self._first_verifier_token = True
+                self._append_output(
+                    f"\n{'─' * 50}\n"
+                    f"🔄 Round {num}/{total}: {subtopic}\n"
+                    f"{'─' * 50}\n\n",
+                    tag="system",
+                )
+                self._counter_label.configure(
+                    text=f"🔬 Research round {num}/{total}",
+                )
+                for dot in self._agent_dots.values():
+                    dot.configure(text_color=COLORS["text_muted"])
+            self.after(0, _ui)
+
+        def _bg():
+            result = swarm.run_research_loop(
+                topic=topic,
+                output_dir=output_dir,
+                max_rounds=max_rounds,
+                on_round=_on_round,
+                on_agent_status=self._on_agent_status,
+                on_agent_done=self._on_agent_done,
+                on_verifier_token=self._on_verifier_token,
+            )
+
+            def _done():
+                self._running = False
+                self.btn_run.configure(state="normal")
+                self.btn_research.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                self._swarm = None
+
+                n = result.get("total_rounds", 0)
+                elapsed = result.get("elapsed", 0)
+                files = result.get("files_created", [])
+
+                self._append_output(
+                    f"\n\n{'━' * 65}\n"
+                    f"🔬 RESEARCH COMPLETE — {n} rounds • "
+                    f"{elapsed / 60:.1f} min • "
+                    f"{len(files)} files saved\n"
+                    f"📁 {output_dir}\n"
+                    f"{'━' * 65}\n",
+                    tag="system",
+                )
+                self._counter_label.configure(
+                    text=f"🔬 {n} rounds  •  {elapsed / 60:.1f} min  •  "
+                         f"{len(files)} files",
+                )
+            self.after(0, _done)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def _on_agent_status(self, role: str, status: str):
         self._update_agent_dot(role, status)

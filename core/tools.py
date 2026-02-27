@@ -237,6 +237,71 @@ class SwarmTools:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    # ——— Browser / Navigation tools ———————————————————————
+
+    @staticmethod
+    def open_url(url):
+        """Open a URL in Microsoft Edge (the user's default browser)."""
+        if SwarmTools.safety_level == READ_ONLY:
+            return {"success": False, "error": "Blocked — safety is Read-Only"}
+        if SwarmTools.safety_level == CONFIRMED:
+            if not _request_confirmation(f"Open URL in Edge:\n{url}"):
+                return {"success": False, "error": "Denied by user"}
+        try:
+            subprocess.Popen(["start", "msedge", url], shell=True)
+            return {"success": True, "message": f"Opened {url} in Edge"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def scroll(direction="down", amount=5):
+        """Scroll the mouse wheel up or down."""
+        if not HAS_PYAUTOGUI:
+            return {"success": False, "error": "pyautogui not installed"}
+        try:
+            clicks = int(amount)
+            if direction == "up":
+                clicks = abs(clicks)
+            else:
+                clicks = -abs(clicks)
+            pyautogui.scroll(clicks)
+            return {"success": True, "message": f"Scrolled {direction} {abs(clicks)} clicks"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def wait(seconds=2):
+        """Wait/pause for a number of seconds (e.g. for page loads)."""
+        import time
+        secs = min(float(seconds), 30)  # cap at 30s
+        time.sleep(secs)
+        return {"success": True, "message": f"Waited {secs:.1f}s"}
+
+    @staticmethod
+    def mouse_move(x, y):
+        """Move the mouse to specific screen coordinates (without clicking)."""
+        if not HAS_PYAUTOGUI:
+            return {"success": False, "error": "pyautogui not installed"}
+        try:
+            pyautogui.moveTo(int(x), int(y), duration=0.3)
+            return {"success": True, "message": f"Moved mouse to ({x}, {y})"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def screenshot_region(x, y, width, height):
+        """Screenshot a specific region of the screen and OCR it."""
+        if not HAS_OCR:
+            return {"success": False, "error": "pytesseract/Pillow not installed"}
+        try:
+            bbox = (int(x), int(y), int(x) + int(width), int(y) + int(height))
+            img = ImageGrab.grab(bbox=bbox)
+            text = pytesseract.image_to_string(img).strip()
+            return {"success": True, "text": text[:15000],
+                    "region": f"{x},{y} {width}x{height}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
 
 # ── Tool schemas for Grok function calling (OpenAI format) ─
 
@@ -390,6 +455,88 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": "Open a URL in Microsoft Edge browser. Use this to navigate to websites, Google searches, documentation, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string",
+                            "description": "Full URL to open (e.g. https://google.com or https://www.google.com/search?q=query)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scroll",
+            "description": "Scroll the mouse wheel up or down on the current window. Use to scroll through web pages, documents, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string",
+                                  "description": "Scroll direction: 'up' or 'down'",
+                                  "default": "down"},
+                    "amount":    {"type": "integer",
+                                  "description": "Number of scroll clicks (1-20)",
+                                  "default": 5},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait",
+            "description": "Pause/wait for a number of seconds. Use after opening URLs or clicking to let pages load.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number",
+                                "description": "Seconds to wait (max 30)",
+                                "default": 2},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mouse_move",
+            "description": "Move the mouse cursor to specific screen coordinates without clicking. Use to hover over elements.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X coordinate"},
+                    "y": {"type": "integer", "description": "Y coordinate"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot_region",
+            "description": "Take a screenshot of a specific rectangular region on screen and OCR it to extract text. Useful for reading specific parts of a webpage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x":      {"type": "integer", "description": "Top-left X coordinate"},
+                    "y":      {"type": "integer", "description": "Top-left Y coordinate"},
+                    "width":  {"type": "integer", "description": "Width in pixels"},
+                    "height": {"type": "integer", "description": "Height in pixels"},
+                },
+                "required": ["x", "y", "width", "height"],
+            },
+        },
+    },
 ]
 
 
@@ -410,6 +557,16 @@ _TOOL_MAP = {
     "click":           lambda a: SwarmTools.click(
                             a.get("x", 0), a.get("y", 0),
                             a.get("button", "left")),
+    "open_url":        lambda a: SwarmTools.open_url(a.get("url", "")),
+    "scroll":          lambda a: SwarmTools.scroll(
+                            a.get("direction", "down"),
+                            a.get("amount", 5)),
+    "wait":            lambda a: SwarmTools.wait(a.get("seconds", 2)),
+    "mouse_move":      lambda a: SwarmTools.mouse_move(
+                            a.get("x", 0), a.get("y", 0)),
+    "screenshot_region": lambda a: SwarmTools.screenshot_region(
+                            a.get("x", 0), a.get("y", 0),
+                            a.get("width", 800), a.get("height", 600)),
 }
 
 

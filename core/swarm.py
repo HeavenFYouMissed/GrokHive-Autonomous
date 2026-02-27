@@ -12,6 +12,8 @@ Uses pure urllib (no requests dependency) + OpenAI-compatible API.
 """
 import concurrent.futures
 import json
+import os
+import re
 import ssl
 import time
 import urllib.error
@@ -146,10 +148,25 @@ def _run_agent(role_name, role_focus, task, context,
     system_prompt = (
         f"You are a Grok Swarm Agent — role: {role_name}\n"
         f"Specialty: {role_focus}\n\n"
-        "You have access to PC automation tools (listed below). "
-        "Use them ONLY when the task genuinely requires it. "
-        "Be thorough, precise, and produce actionable output.\n"
-        "If you use a tool, briefly explain what you did and why."
+        "You have FULL PC automation — you control this Windows computer like a human.\n\n"
+        "BROWSER WORKFLOW (use this to research anything online):\n"
+        "1. open_url('https://www.google.com/search?q=your+search+query') — opens Edge\n"
+        "2. wait(3) — let the page load\n"
+        "3. ocr_screenshot() — read what's on screen\n"
+        "4. click(x, y) — click links, buttons, search results\n"
+        "5. scroll('down', 5) — scroll to see more content\n"
+        "6. screenshot_region(x, y, w, h) — read a specific area\n"
+        "7. Repeat: screenshot → read → click → scroll → screenshot\n"
+        "8. write_file('path', content) — save your findings\n\n"
+        "You can also: type_text() into search bars, press_keys('ctrl,a') to select all,\n"
+        "press_keys('ctrl,c') to copy, get_clipboard() to read copied text.\n\n"
+        "IMPORTANT:\n"
+        "• You ARE the mouse and keyboard — navigate exactly like a person would\n"
+        "• After opening a URL, ALWAYS wait() then ocr_screenshot() to see the page\n"
+        "• Use screenshot coordinates to know WHERE to click\n"
+        "• Save all research findings to files with write_file()\n"
+        "• Be thorough — scroll through entire pages, follow links, dig deep\n"
+        "• NEVER visit guidedhacking.com (owner's paid subscription site)\n"
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -371,4 +388,117 @@ class MiniGrokSwarm:
             "error": result.get("error", "Verifier failed"),
             "agent_outputs": agent_outputs,
             "elapsed": elapsed,
+        }
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # RESEARCH LOOP — autonomous overnight research
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def run_research_loop(self, topic, output_dir,
+                          max_rounds=20, on_round=None,
+                          on_agent_status=None, on_agent_done=None,
+                          on_verifier_token=None):
+        """Run continuous autonomous research on a topic.
+
+        Each round:
+          1. Swarm researches a sub-topic (opens browser, scrapes, etc.)
+          2. Verifier synthesises findings → saved to a file
+          3. Verifier also outputs 1-3 follow-up sub-topics
+          4. Next round picks the best follow-up and continues
+
+        Files saved to output_dir:
+          round_01_<subtopic>.md, round_02_<subtopic>.md, ...
+          research_index.md — master index of all findings
+
+        Returns dict with total_rounds, files_created, elapsed.
+        """
+        self._cancelled = False
+        os.makedirs(output_dir, exist_ok=True)
+        t0 = time.time()
+        files_created = []
+        current_task = topic
+        all_summaries = []
+
+        for round_num in range(1, max_rounds + 1):
+            if self._cancelled:
+                break
+
+            if on_round:
+                on_round(round_num, max_rounds, current_task)
+
+            # Build the research prompt for this round
+            research_prompt = (
+                f"RESEARCH ROUND {round_num}/{max_rounds}\n"
+                f"MAIN TOPIC: {topic}\n"
+                f"CURRENT SUB-TASK: {current_task}\n\n"
+                "Instructions:\n"
+                "1. Open Edge browser and search Google for this topic\n"
+                "2. Visit 2-3 relevant links, read the content via OCR\n"
+                "3. Copy important text, code snippets, data\n"
+                "4. Save all findings to files using write_file()\n"
+                "5. Be thorough — scroll through pages, follow links\n"
+                "6. NEVER visit guidedhacking.com\n\n"
+                f"Save files to: {output_dir}\n\n"
+                "At the end, provide:\n"
+                "- A summary of what you found\n"
+                "- 1-3 follow-up sub-topics to research next (prefix each with NEXT:)"
+            )
+
+            # Run one full swarm cycle
+            result = self.run(
+                task=research_prompt,
+                on_agent_status=on_agent_status,
+                on_agent_done=on_agent_done,
+                on_verifier_token=on_verifier_token,
+            )
+
+            if not result["success"]:
+                break
+
+            # Save round output
+            safe_name = re.sub(r'[^\w\s-]', '', current_task)[:50].strip()
+            safe_name = re.sub(r'\s+', '_', safe_name)
+            filename = f"round_{round_num:02d}_{safe_name}.md"
+            filepath = os.path.join(output_dir, filename)
+
+            output_text = result.get("final_output", "")
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(f"# Research Round {round_num}: {current_task}\n\n")
+                f.write(output_text)
+            files_created.append(filepath)
+            all_summaries.append(
+                f"## Round {round_num}: {current_task}\n\n"
+                f"{output_text[:500]}...\n"
+            )
+
+            # Extract next sub-topic from verifier output
+            next_topics = re.findall(
+                r'NEXT:\s*(.+)', output_text, re.IGNORECASE)
+            if next_topics:
+                current_task = next_topics[0].strip()
+            else:
+                # No follow-ups suggested — generate one from Grok
+                current_task = f"{topic} — deeper dive round {round_num + 1}"
+
+            # Reset verifier token flag for next round
+            self._first_verifier_token_flag = True
+
+        # Write master index
+        index_path = os.path.join(output_dir, "research_index.md")
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write(f"# Research Index: {topic}\n\n")
+            f.write(f"Total rounds: {len(files_created)}\n")
+            f.write(f"Elapsed: {time.time() - t0:.0f}s\n\n")
+            for i, fp in enumerate(files_created, 1):
+                name = os.path.basename(fp)
+                f.write(f"- [{name}]({name})\n")
+            f.write("\n\n---\n\n")
+            f.write("\n".join(all_summaries))
+        files_created.append(index_path)
+
+        return {
+            "success": not self._cancelled,
+            "total_rounds": len(files_created) - 1,  # minus index
+            "files_created": files_created,
+            "elapsed": time.time() - t0,
         }

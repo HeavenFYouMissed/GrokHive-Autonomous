@@ -75,8 +75,8 @@ The confirmation dialog lets you **Allow**, **Deny**, or **Deny & Lock Read-Only
 ### 1. Clone
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/MiniGrokSwarm.git
-cd MiniGrokSwarm
+git clone https://github.com/HeavenFYouMissed/GrokHive-Autonomous.git
+cd GrokHive-Autonomous
 ```
 
 ### 2. Create virtual environment

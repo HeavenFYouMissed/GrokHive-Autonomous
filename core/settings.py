@@ -25,7 +25,7 @@ DEFAULTS = {
 
     # Verifier backend (Ollama = local uncensored, Grok = API)
     "verifier_backend": "ollama",
-    "ollama_model": "qwen3-vl:4b-instruct",
+    "ollama_model": "huihui_ai/qwen3-abliterated:14b",
     "ollama_url": "http://localhost:11434",
 }
 

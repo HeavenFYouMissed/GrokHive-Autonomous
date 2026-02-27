@@ -602,7 +602,7 @@ class SwarmApp(ctk.CTk):
             text_color=COLORS["text_primary"],
             border_color=COLORS["border"],
             border_width=1, corner_radius=8, height=34, width=350,
-            placeholder_text="qwen3-vl:4b-instruct",
+            placeholder_text="huihui_ai/qwen3-abliterated:14b",
         )
         self.ollama_model_entry.grid(row=1, column=1, sticky="w", pady=6)
 
@@ -957,7 +957,7 @@ class SwarmApp(ctk.CTk):
         url = (self.ollama_url_entry.get().strip()
                or "http://localhost:11434")
         model = (self.ollama_model_entry.get().strip()
-                 or "qwen3-vl:4b-instruct")
+                 or "huihui_ai/qwen3-abliterated:14b")
         self._ollama_status.configure(
             text="⏳ Testing...", text_color=COLORS["text_muted"])
 
@@ -1206,7 +1206,7 @@ class SwarmApp(ctk.CTk):
             "ollama" if "Ollama" in vb else "grok")
         self._settings["ollama_model"] = (
             self.ollama_model_entry.get().strip()
-            or "qwen3-vl:4b-instruct")
+            or "huihui_ai/qwen3-abliterated:14b")
         self._settings["ollama_url"] = (
             self.ollama_url_entry.get().strip()
             or "http://localhost:11434")
@@ -1272,7 +1272,7 @@ class SwarmApp(ctk.CTk):
         vb = s.get("verifier_backend", "ollama")
         self.verifier_menu.set(
             "Ollama (Local)" if vb == "ollama" else "Grok (API)")
-        om = s.get("ollama_model", "qwen3-vl:4b-instruct")
+        om = s.get("ollama_model", "huihui_ai/qwen3-abliterated:14b")
         self.ollama_model_entry.delete(0, "end")
         self.ollama_model_entry.insert(0, om)
         ou = s.get("ollama_url", "http://localhost:11434")
@@ -1432,7 +1432,7 @@ class SwarmApp(ctk.CTk):
             tag="system",
         )
         vb = self._settings.get("verifier_backend", "ollama")
-        vb_display = (f"Ollama ({self._settings.get('ollama_model', 'qwen3-vl:4b-instruct')})"
+        vb_display = (f"Ollama ({self._settings.get('ollama_model', 'huihui_ai/qwen3-abliterated:14b')})"
                       if vb == "ollama" else "Grok API")
         self._append_output(
             f"🧪 Verifier: {vb_display}\n",
@@ -1462,7 +1462,7 @@ class SwarmApp(ctk.CTk):
             verifier_backend=self._settings.get(
                 "verifier_backend", "ollama"),
             ollama_model=self._settings.get(
-                "ollama_model", "qwen3-vl:4b-instruct"),
+                "ollama_model", "huihui_ai/qwen3-abliterated:14b"),
             ollama_url=self._settings.get(
                 "ollama_url", "http://localhost:11434"),
         )
@@ -1578,7 +1578,7 @@ class SwarmApp(ctk.CTk):
             verifier_backend=self._settings.get(
                 "verifier_backend", "ollama"),
             ollama_model=self._settings.get(
-                "ollama_model", "qwen3-vl:4b-instruct"),
+                "ollama_model", "huihui_ai/qwen3-abliterated:14b"),
             ollama_url=self._settings.get(
                 "ollama_url", "http://localhost:11434"),
         )

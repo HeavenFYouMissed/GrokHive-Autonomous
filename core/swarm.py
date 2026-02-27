@@ -304,7 +304,7 @@ class MiniGrokSwarm:
                  model=DEFAULT_MODEL, tier="medium",
                  max_tool_rounds=5, timeout=180,
                  verifier_backend="ollama",
-                 ollama_model="qwen3-vl:4b-instruct",
+                 ollama_model="huihui_ai/qwen3-abliterated:14b",
                  ollama_url=None):
         # Accept list of keys; filter out empty strings
         keys = [k for k in (api_keys or []) if k.strip()]

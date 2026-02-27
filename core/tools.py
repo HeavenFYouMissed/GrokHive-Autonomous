@@ -216,6 +216,25 @@ class SwarmTools:
             return {"success": False, "error": str(e)}
 
     @staticmethod
+    def append_file(path, content):
+        """Append text to a file (creates it if it doesn't exist)."""
+        if SwarmTools.safety_level == READ_ONLY:
+            return {"success": False, "error": "Blocked — safety is Read-Only"}
+        if SwarmTools.safety_level == CONFIRMED:
+            preview = content[:300] + ("..." if len(content) > 300 else "")
+            if not _request_confirmation(
+                    f"Append to file:\n{path}\n\nPreview:\n{preview}"):
+                return {"success": False, "error": "Denied by user"}
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(content)
+            return {"success": True,
+                    "message": f"Appended {len(content):,} chars → {path}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
     def type_text(text):
         """Simulate keyboard typing into the focused window."""
         if not HAS_PYAUTOGUI:
@@ -454,6 +473,23 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "append_file",
+            "description": "Append text to a file (creates it if needed). Use this to build up a raw data file by adding content from multiple pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path":    {"type": "string",
+                                "description": "File path to append to"},
+                    "content": {"type": "string",
+                                "description": "Text content to append"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "type_text",
             "description": "Simulate keyboard typing into the currently focused window.",
             "parameters": {
@@ -617,6 +653,8 @@ _TOOL_MAP = {
     "get_clipboard":   lambda a: SwarmTools.get_clipboard(),
     "run_powershell":  lambda a: SwarmTools.run_powershell(a.get("cmd", "")),
     "write_file":      lambda a: SwarmTools.write_file(
+                            a.get("path", ""), a.get("content", "")),
+    "append_file":     lambda a: SwarmTools.append_file(
                             a.get("path", ""), a.get("content", "")),
     "type_text":       lambda a: SwarmTools.type_text(a.get("text", "")),
     "open_in_vscode":  lambda a: SwarmTools.open_in_vscode(a.get("path", "")),

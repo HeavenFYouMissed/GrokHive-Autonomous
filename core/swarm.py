@@ -195,7 +195,7 @@ def test_connection(api_key: str) -> tuple[bool, str]:
 
 def _run_agent(role_name, role_focus, task, context,
                model, api_key, tools, on_status=None,
-               max_tool_rounds=5):
+               max_tool_rounds=20):
     """Run one agent with an iterative tool-calling loop.
 
     The agent can call tools up to *max_tool_rounds* times.
@@ -205,25 +205,34 @@ def _run_agent(role_name, role_focus, task, context,
         f"You are a Grok Swarm Agent — role: {role_name}\n"
         f"Specialty: {role_focus}\n\n"
         "You have FULL PC automation — you control this Windows computer like a human.\n\n"
-        "BROWSER WORKFLOW (use this to research anything online):\n"
+        "BROWSER WORKFLOW — NAVIGATION (use OCR to see where to click):\n"
         "1. open_url('https://www.google.com/search?q=your+search+query') — opens Edge\n"
         "2. wait(3) — let the page load\n"
-        "3. ocr_screenshot() — read what's on screen\n"
-        "4. click(x, y) — click links, buttons, search results\n"
-        "5. scroll('down', 5) — scroll to see more content\n"
-        "6. screenshot_region(x, y, w, h) — read a specific area\n"
-        "7. Repeat: screenshot → read → click → scroll → screenshot\n"
-        "8. write_file('path', content) — save your findings\n\n"
-        "You can also: type_text() into search bars, press_keys('ctrl,a') to select all,\n"
-        "press_keys('ctrl,c') to copy, get_clipboard() to read copied text.\n"
-        "close_browser_tab() — close tabs when done reading a page to keep things tidy.\n\n"
+        "3. ocr_screenshot() — read the screen to see links/buttons/layout\n"
+        "4. click(x, y) — click search results, links, buttons\n"
+        "5. scroll('down', 5) — scroll to see more content\n\n"
+        "RAW DATA EXTRACTION (use clipboard — NOT OCR — for actual data):\n"
+        "1. Once on a good page with useful content:\n"
+        "2. press_keys('ctrl,a') — select ALL text on the page\n"
+        "3. press_keys('ctrl,c') — copy it\n"
+        "4. get_clipboard() — retrieve the raw text\n"
+        "5. append_file(path, raw_text) — dump it into the data file VERBATIM\n"
+        "6. close_browser_tab() — close the tab, move to next page\n"
+        "7. Repeat for every useful page you find\n\n"
+        "DATA RULES:\n"
+        "• NEVER summarise, rewrite, or paraphrase scraped content\n"
+        "• Paste the EXACT raw text from the clipboard into the file\n"
+        "• Add a header line before each dump: \n"
+        "  ═══ SOURCE: <url or page title> ═══\n"
+        "• Use append_file() to keep adding to ONE file (not write_file which overwrites)\n"
+        "• Use ocr_screenshot() ONLY for navigation (finding where to click)\n"
+        "• Use get_clipboard() for actual data extraction (much higher quality than OCR)\n\n"
         "IMPORTANT:\n"
         "• You ARE the mouse and keyboard — navigate exactly like a person would\n"
         "• After opening a URL, ALWAYS wait() then ocr_screenshot() to see the page\n"
         "• Use screenshot coordinates to know WHERE to click\n"
-        "• Save all research findings to files with write_file()\n"
-        "• Be thorough — scroll through entire pages, follow links, dig deep\n"
-        "• Close browser tabs when done with a page using close_browser_tab()\n"
+        "• Be thorough — visit multiple pages, scroll, grab everything useful\n"
+        "• ALWAYS close_browser_tab() after extracting data from a page\n"
         "• NEVER visit guidedhacking.com (owner's paid subscription site)\n"
     )
 
@@ -302,7 +311,7 @@ class MiniGrokSwarm:
 
     def __init__(self, api_keys: list[str] | None = None,
                  model=DEFAULT_MODEL, tier="medium",
-                 max_tool_rounds=5, timeout=180,
+                 max_tool_rounds=15, timeout=180,
                  verifier_backend="ollama",
                  ollama_model="huihui_ai/qwen3-abliterated:14b",
                  ollama_url=None):
@@ -326,8 +335,13 @@ class MiniGrokSwarm:
 
     def run(self, task, context="",
             on_agent_status=None, on_agent_done=None,
-            on_verifier_token=None):
+            on_verifier_token=None,
+            verifier_system=None):
         """Execute the full swarm pipeline.
+
+        Args:
+          verifier_system: Optional custom system prompt for the verifier.
+                           If None, uses the default synthesis prompt.
 
         Returns dict with:
           success, final_output, agent_outputs, elapsed
@@ -404,21 +418,23 @@ class MiniGrokSwarm:
             for role, out in agent_outputs.items()
         )
 
+        default_verifier = (
+            "You are the Verifier Agent — the final authority.\n\n"
+            "You receive outputs from multiple specialist agents "
+            "that all worked on the same task in parallel.\n\n"
+            "Your job:\n"
+            "1. Cross-check all outputs for accuracy & consistency\n"
+            "2. Merge the best parts into one coherent, actionable response\n"
+            "3. Flag any contradictions or errors\n"
+            "4. Produce a polished final output that fully addresses "
+            "the original task\n\n"
+            "Quality over quantity. Be thorough but concise."
+        )
+
         verifier_messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are the Verifier Agent — the final authority.\n\n"
-                    "You receive outputs from multiple specialist agents "
-                    "that all worked on the same task in parallel.\n\n"
-                    "Your job:\n"
-                    "1. Cross-check all outputs for accuracy & consistency\n"
-                    "2. Merge the best parts into one coherent, actionable response\n"
-                    "3. Flag any contradictions or errors\n"
-                    "4. Produce a polished final output that fully addresses "
-                    "the original task\n\n"
-                    "Quality over quantity. Be thorough but concise."
-                ),
+                "content": verifier_system or default_verifier,
             },
             {
                 "role": "user",
@@ -498,22 +514,52 @@ class MiniGrokSwarm:
             if on_round:
                 on_round(round_num, max_rounds, current_task)
 
+            # Build the raw-data collection file path for this round
+            raw_file = os.path.join(
+                output_dir,
+                f"raw_data_round_{round_num:02d}.txt",
+            )
+
             # Build the research prompt for this round
             research_prompt = (
                 f"RESEARCH ROUND {round_num}/{max_rounds}\n"
                 f"MAIN TOPIC: {topic}\n"
                 f"CURRENT SUB-TASK: {current_task}\n\n"
-                "Instructions:\n"
-                "1. Open Edge browser and search Google for this topic\n"
-                "2. Visit 2-3 relevant links, read the content via OCR\n"
-                "3. Copy important text, code snippets, data\n"
-                "4. Save all findings to files using write_file()\n"
-                "5. Be thorough — scroll through pages, follow links\n"
-                "6. NEVER visit guidedhacking.com\n\n"
-                f"Save files to: {output_dir}\n\n"
-                "At the end, provide:\n"
-                "- A summary of what you found\n"
-                "- 1-3 follow-up sub-topics to research next (prefix each with NEXT:)"
+                "YOUR MISSION — RAW DATA COLLECTION:\n"
+                "1. Search Google for this topic\n"
+                "2. Visit 3-5 of the best links (research papers, articles, code repos, forums)\n"
+                "3. On EACH page:\n"
+                "   a) press_keys('ctrl,a') to select all text\n"
+                "   b) press_keys('ctrl,c') to copy\n"
+                "   c) get_clipboard() to retrieve the raw text\n"
+                "   d) append_file() to dump it into the data file with a SOURCE header\n"
+                "   e) close_browser_tab() when done\n"
+                "4. DO NOT summarise, rewrite, or paraphrase — paste RAW text only\n"
+                "5. NEVER visit guidedhacking.com\n\n"
+                f"APPEND ALL RAW DATA TO: {raw_file}\n"
+                "Format each page dump like:\n"
+                "═══ SOURCE: <page URL or title> ═══\n"
+                "<raw clipboard text here>\n\n"
+                "After collecting data, list what you found and suggest:\n"
+                "NEXT: <follow-up topic 1>\n"
+                "NEXT: <follow-up topic 2>\n"
+                "NEXT: <follow-up topic 3>\n"
+            )
+
+            # Verifier prompt for research mode — catalog only, don't rewrite
+            research_verifier = (
+                "You are the Research Verifier. Respond ONLY in English.\n\n"
+                "The agents below collected RAW data from websites and saved it "
+                "to files. Your job is ONLY to:\n\n"
+                "1. List every URL / source the agents visited\n"
+                "2. Briefly note what type of content was found at each source "
+                "   (e.g. 'academic paper on ML anti-cheat', 'forum thread with code examples')\n"
+                "3. Note any files that were saved and their paths\n"
+                "4. Flag if any agent failed or found nothing useful\n\n"
+                "DO NOT rewrite, summarise, or paraphrase any of the collected data.\n"
+                "The raw data is already saved to files — your job is just to catalog it.\n\n"
+                "At the end, suggest 1-3 follow-up topics to research next.\n"
+                "Format: NEXT: <topic>\n"
             )
 
             # Run one full swarm cycle
@@ -522,6 +568,7 @@ class MiniGrokSwarm:
                 on_agent_status=on_agent_status,
                 on_agent_done=on_agent_done,
                 on_verifier_token=on_verifier_token,
+                verifier_system=research_verifier,
             )
 
             if not result["success"]:
@@ -534,6 +581,8 @@ class MiniGrokSwarm:
             filepath = os.path.join(output_dir, filename)
 
             output_text = result.get("final_output", "")
+            # Strip leaked chain-of-thought tags
+            output_text = re.sub(r'</think>', '', output_text).strip()
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(f"# Research Round {round_num}: {current_task}\n\n")
                 f.write(output_text)

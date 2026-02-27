@@ -1,0 +1,56 @@
+"""
+MiniGrok Swarm — Configuration constants.
+"""
+import os
+
+APP_NAME = "MiniGrok Swarm"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(APP_DIR, "data")
+
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 800
+SIDEBAR_WIDTH = 280
+
+# ── Grok API ────────────────────────────────────────────────
+GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+GROK_MODELS_URL = "https://api.x.ai/v1/models"
+
+GROK_MODELS = [
+    "grok-3",
+    "grok-3-mini",
+    "grok-3-fast",
+    "grok-2-latest",
+    "grok-beta",
+]
+DEFAULT_MODEL = "grok-3"
+
+# ── Agent Roles (tiered) ───────────────────────────────────
+AGENT_ROLES = {
+    "minimum": [
+        ("🔍 Researcher", "Deep research — facts, references, vulnerability analysis, documentation lookup"),
+        ("📋 Planner",    "Architecture planning — steps, edge cases, project structure, dependencies"),
+    ],
+    "medium": [
+        ("🔍 Researcher", "Deep research — facts, references, vulnerability analysis, documentation lookup"),
+        ("📋 Planner",    "Architecture planning — steps, edge cases, project structure, dependencies"),
+        ("💻 Coder",      "Code generation — scripts, implementations, algorithms, clean production code"),
+        ("🧪 Tester",     "Testing & QA — simulate edge cases, find flaws, adversarial testing, validation"),
+    ],
+    "full": [
+        ("🔍 Researcher", "Deep research — facts, references, vulnerability analysis, documentation lookup"),
+        ("📋 Planner",    "Architecture planning — steps, edge cases, project structure, dependencies"),
+        ("💻 Coder",      "Code generation — scripts, implementations, algorithms, clean production code"),
+        ("🧪 Tester",     "Testing & QA — simulate edge cases, find flaws, adversarial testing, validation"),
+        ("⚡ Optimizer",  "Performance optimization — efficiency improvements, complexity reduction, caching"),
+        ("🛡️ Security",   "Security audit — vulnerability scanning, hardening, evasion detection, safe defaults"),
+        ("🔗 Integrator", "System integration — merge components, resolve conflicts, ensure compatibility"),
+        ("✅ QA",         "Final quality assurance — documentation, polish, completeness, standards compliance"),
+    ],
+}
+
+# ── Safety Levels ───────────────────────────────────────────
+SAFETY_LEVELS = {
+    "read_only":  "🔒 Read-Only (screenshots, OCR, file reading)",
+    "confirmed":  "⚠️ Confirmed (asks before write/execute)",
+    "full_auto":  "🔓 Full Auto (no confirmation — dangerous!)",
+}

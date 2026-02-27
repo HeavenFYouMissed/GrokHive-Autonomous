@@ -7,9 +7,9 @@ APP_NAME = "MiniGrok Swarm"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
 
-WINDOW_WIDTH = 1200
-WINDOW_HEIGHT = 800
-SIDEBAR_WIDTH = 280
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 850
+MAX_API_KEYS = 8
 
 # ── Grok API ────────────────────────────────────────────────
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"

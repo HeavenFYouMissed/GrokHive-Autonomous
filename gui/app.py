@@ -1,31 +1,34 @@
 """
-MiniGrok Swarm — Main GUI Application.
+MiniGrok Swarm — Main GUI Application (v2 — Tabbed Layout).
 
-Single-window layout:
-  Sidebar (left):  API keys · Model/Tier/Safety config · Context files
-  Main (right):    Agent status bar · Streaming output · Task input
+Three-tab layout:
+  🚀 Swarm     — Agent status bar, streaming output, task input
+  🔑 API Keys  — 8 key slots with per-key status indicators
+  ⚙️ Settings  — Model, tier, safety, behaviour, appearance
 """
 import ctypes
 import os
 import threading
 import time
+import tkinter as tk
 import tkinter.filedialog as tkfd
 import customtkinter as ctk
 
 from config import (
-    APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT, SIDEBAR_WIDTH,
+    APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT, MAX_API_KEYS,
     GROK_MODELS, DEFAULT_MODEL, AGENT_ROLES, SAFETY_LEVELS,
 )
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES
 from gui.widgets import ActionButton, Tooltip, ConfirmDialog
 from core.settings import load_settings, save_settings
 from core.swarm import MiniGrokSwarm, list_grok_models, test_connection
-from core.tools import set_confirm_callback, SwarmTools
+from core.tools import set_confirm_callback, SwarmTools, READ_ONLY
 
 
 # ── Windows 11 Mica titlebar ────────────────────────────────
 
 def _apply_mica(window):
+    """Apply dark Mica titlebar on Windows 11+."""
     try:
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -59,269 +62,135 @@ class SwarmApp(ctk.CTk):
 
         # ─── State ──────────────────────────────────────────
         self._settings = load_settings()
+        self._migrate_keys()
         self._running = False
         self._swarm: MiniGrokSwarm | None = None
-        self._context_files: list[tuple[str, str]] = []  # (path, content)
+        self._context_files: list[tuple[str, str]] = []
         self._agent_dots: dict[str, ctk.CTkLabel] = {}
         self._first_verifier_token = True
 
         # ─── Layout ─────────────────────────────────────────
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        self._build_sidebar()
-        self._build_main()
+        self._build_nav_bar()
+        self._pages: dict[str, ctk.CTkFrame] = {}
+        self._build_swarm_page()
+        self._build_keys_page()
+        self._build_settings_page()
+        self._switch_page("swarm")
 
         # ─── Tool confirmation system ───────────────────────
         set_confirm_callback(self._confirm_tool_action)
 
         # ─── Populate UI from saved settings ────────────────
         self._load_settings_to_ui()
-        self.after(400, self._check_connection)
+        self.after(400, self._auto_check_keys)
+
+    # ─────────────────────────────────────────────────────────
+    # Migration: old key_1/key_2 → new api_keys list
+    # ─────────────────────────────────────────────────────────
+    def _migrate_keys(self):
+        s = self._settings
+        if "grok_api_key_1" in s:
+            keys = s.get("api_keys", [""] * MAX_API_KEYS)
+            if s["grok_api_key_1"]:
+                keys[0] = s["grok_api_key_1"]
+            if s.get("grok_api_key_2"):
+                keys[1] = s["grok_api_key_2"]
+            s["api_keys"] = keys
+            s.pop("grok_api_key_1", None)
+            s.pop("grok_api_key_2", None)
+            save_settings(s)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # SIDEBAR
+    # NAVIGATION BAR
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _build_sidebar(self):
-        sidebar = ctk.CTkFrame(
-            self, width=SIDEBAR_WIDTH, fg_color=COLORS["bg_sidebar"],
-            corner_radius=0,
-        )
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
+    def _build_nav_bar(self):
+        nav = ctk.CTkFrame(self, fg_color=COLORS["bg_sidebar"],
+                           corner_radius=0, height=56)
+        nav.grid(row=0, column=0, sticky="ew")
+        nav.grid_propagate(False)
 
-        # Title
-        title_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
-        title_frame.pack(fill="x", padx=15, pady=(20, 5))
-
+        # Logo
         ctk.CTkLabel(
-            title_frame, text="🤖 MiniGrok",
-            font=(FONT_FAMILY, 22, "bold"),
+            nav, text="🤖 MiniGrok Swarm",
+            font=(FONT_FAMILY, 18, "bold"),
             text_color=COLORS["accent"],
-        ).pack(anchor="w")
+        ).pack(side="left", padx=(20, 40))
 
-        ctk.CTkLabel(
-            title_frame, text="Agent Swarm",
-            font=(FONT_FAMILY, 14),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w")
+        # Tab buttons
+        self._nav_btns: dict[str, ctk.CTkButton] = {}
+        tabs = [
+            ("swarm",    "🚀  Swarm"),
+            ("keys",     "🔑  API Keys"),
+            ("settings", "⚙️  Settings"),
+        ]
+        for key, label in tabs:
+            btn = ctk.CTkButton(
+                nav, text=label,
+                font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["text_secondary"],
+                corner_radius=8, height=40, width=140,
+                command=lambda k=key: self._switch_page(k),
+            )
+            btn.pack(side="left", padx=3, pady=8)
+            self._nav_btns[key] = btn
 
-        # Dividers
-        ctk.CTkFrame(sidebar, height=1, fg_color=COLORS["accent_dim"]
-                      ).pack(fill="x", padx=15, pady=(15, 4))
-        ctk.CTkFrame(sidebar, height=1, fg_color=COLORS["divider"]
-                      ).pack(fill="x", padx=20, pady=(0, 10))
-
-        sb_scroll = ctk.CTkScrollableFrame(
-            sidebar, fg_color="transparent",
-        )
-        sb_scroll.pack(fill="both", expand=True, padx=5, pady=0)
-
-        # ── 🔑 API Keys ────────────────────────────────────
-        self._section_label(sb_scroll, "🔑  API KEYS")
-
-        ctk.CTkLabel(
-            sb_scroll, text="Key 1 (required):",
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=10, pady=(2, 0))
-
-        self.key1_entry = ctk.CTkEntry(
-            sb_scroll, show="●",
-            font=(FONT_FAMILY, FONT_SIZES["body"]),
-            fg_color=COLORS["bg_input"],
-            text_color=COLORS["text_primary"],
-            border_color=COLORS["border"],
-            border_width=1, corner_radius=8, height=32,
-        )
-        self.key1_entry.pack(fill="x", padx=10, pady=(2, 4))
-
-        ctk.CTkLabel(
-            sb_scroll, text="Key 2 (optional, for rate-limit split):",
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=10, pady=(2, 0))
-
-        self.key2_entry = ctk.CTkEntry(
-            sb_scroll, show="●",
-            font=(FONT_FAMILY, FONT_SIZES["body"]),
-            fg_color=COLORS["bg_input"],
-            text_color=COLORS["text_primary"],
-            border_color=COLORS["border"],
-            border_width=1, corner_radius=8, height=32,
-        )
-        self.key2_entry.pack(fill="x", padx=10, pady=(2, 4))
-
-        key_btn_row = ctk.CTkFrame(sb_scroll, fg_color="transparent")
-        key_btn_row.pack(fill="x", padx=10, pady=(2, 8))
-
-        ActionButton(
-            key_btn_row, text="💾 Save Keys",
-            command=self._save_keys, style="primary", width=110,
-        ).pack(side="left", padx=(0, 5))
-
-        self._key_toggle_btn = ActionButton(
-            key_btn_row, text="👁", command=self._toggle_key_vis,
-            style="secondary", width=35,
-        )
-        self._key_toggle_btn.pack(side="left", padx=(0, 5))
-        Tooltip(self._key_toggle_btn, "Show / hide API keys")
-
-        ActionButton(
-            key_btn_row, text="🔌 Test",
-            command=self._check_connection, style="secondary", width=70,
-        ).pack(side="left")
-
-        self._keys_visible = False
-
-        # ── ⚙️ Configuration ───────────────────────────────
-        self._section_label(sb_scroll, "⚙️  CONFIGURATION")
-
-        # Model
-        ctk.CTkLabel(
-            sb_scroll, text="Model:",
-            font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", padx=10, pady=(2, 0))
-
-        self.model_menu = ctk.CTkOptionMenu(
-            sb_scroll, values=GROK_MODELS,
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_input"],
-            button_color=COLORS["accent"],
-            button_hover_color=COLORS["accent_hover"],
-            width=240, height=30,
-        )
-        self.model_menu.pack(padx=10, pady=(2, 6), anchor="w")
-        Tooltip(self.model_menu,
-                "Grok model to use for all agents.\n"
-                "grok-3 = most capable (slower)\n"
-                "grok-3-fast = balanced\n"
-                "grok-3-mini = cheapest & fastest")
-
-        # Tier
-        ctk.CTkLabel(
-            sb_scroll, text="Agent Tier:",
-            font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", padx=10, pady=(2, 0))
-
-        self.tier_menu = ctk.CTkOptionMenu(
-            sb_scroll,
-            values=["minimum (2 agents)", "medium (4 agents)", "full (8 agents)"],
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_input"],
-            button_color=COLORS["accent"],
-            button_hover_color=COLORS["accent_hover"],
-            width=240, height=30,
-            command=self._on_tier_change,
-        )
-        self.tier_menu.pack(padx=10, pady=(2, 6), anchor="w")
-        Tooltip(self.tier_menu,
-                "How many specialist agents to deploy.\n"
-                "• Minimum: Researcher + Planner\n"
-                "• Medium: + Coder + Tester\n"
-                "• Full: + Optimizer + Security + Integrator + QA")
-
-        # Safety
-        ctk.CTkLabel(
-            sb_scroll, text="Safety Level:",
-            font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w", padx=10, pady=(2, 0))
-
-        self.safety_menu = ctk.CTkOptionMenu(
-            sb_scroll,
-            values=list(SAFETY_LEVELS.values()),
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_input"],
-            button_color=COLORS["accent"],
-            button_hover_color=COLORS["accent_hover"],
-            width=240, height=30,
-            command=self._on_safety_change,
-        )
-        self.safety_menu.pack(padx=10, pady=(2, 8), anchor="w")
-        Tooltip(self.safety_menu,
-                "Controls what PC tools agents can use.\n"
-                "• Read-Only: screenshots, OCR, file reading only\n"
-                "• Confirmed: asks YOU before any write/execute\n"
-                "• Full Auto: no confirmation (dangerous!)")
-
-        # ── 📎 Context Files ───────────────────────────────
-        self._section_label(sb_scroll, "📎  CONTEXT FILES")
-
-        ctx_btn_row = ctk.CTkFrame(sb_scroll, fg_color="transparent")
-        ctx_btn_row.pack(fill="x", padx=10, pady=(2, 4))
-
-        ActionButton(
-            ctx_btn_row, text="+ Add Files",
-            command=self._add_context_files, style="secondary", width=110,
-        ).pack(side="left", padx=(0, 5))
-
-        ActionButton(
-            ctx_btn_row, text="🗑 Clear",
-            command=self._clear_context, style="danger", width=80,
-        ).pack(side="left")
-
-        self.ctx_list_frame = ctk.CTkScrollableFrame(
-            sb_scroll, fg_color="transparent", height=100,
-        )
-        self.ctx_list_frame.pack(fill="x", padx=10, pady=(0, 8))
-
-        self.ctx_count_label = ctk.CTkLabel(
-            sb_scroll, text="No files attached",
-            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
-            text_color=COLORS["text_muted"],
-        )
-        self.ctx_count_label.pack(anchor="w", padx=10, pady=(0, 8))
-
-        # ── 📊 Connection Status ───────────────────────────
-        self._section_label(sb_scroll, "📊  STATUS")
-
-        self.conn_label = ctk.CTkLabel(
-            sb_scroll, text="Not connected",
+        # Right side — quick status summary
+        self._nav_status = ctk.CTkLabel(
+            nav, text="",
             font=(FONT_FAMILY, FONT_SIZES["small"]),
             text_color=COLORS["text_muted"],
         )
-        self.conn_label.pack(anchor="w", padx=10, pady=(2, 10))
+        self._nav_status.pack(side="right", padx=20)
 
-        # Sidebar glow line
-        ctk.CTkFrame(
-            self, width=1, fg_color=COLORS["accent_dim"], corner_radius=0,
-        ).grid(row=0, column=0, sticky="nse")
+    def _switch_page(self, page_name: str):
+        for frame in self._pages.values():
+            frame.grid_forget()
+        self._pages[page_name].grid(row=1, column=0, sticky="nsew")
+
+        for name, btn in self._nav_btns.items():
+            if name == page_name:
+                btn.configure(fg_color=COLORS["accent_dim"],
+                              text_color=COLORS["accent"])
+            else:
+                btn.configure(fg_color="transparent",
+                              text_color=COLORS["text_secondary"])
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # MAIN AREA
+    # PAGE 1 — 🚀 SWARM
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _build_main(self):
-        main = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"], corner_radius=0)
-        main.grid(row=0, column=1, sticky="nsew")
-        main.grid_columnconfigure(0, weight=1)
-        main.grid_rowconfigure(1, weight=1)  # output expands
+    def _build_swarm_page(self):
+        page = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"],
+                            corner_radius=0)
+        self._pages["swarm"] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
 
         # ── Agent status bar ────────────────────────────────
-        status_bar = ctk.CTkFrame(
-            main, fg_color=COLORS["bg_card"], corner_radius=10, height=50,
-        )
-        status_bar.grid(row=0, column=0, sticky="ew", padx=15, pady=(12, 5))
+        status_card = ctk.CTkFrame(page, fg_color=COLORS["bg_card"],
+                                   corner_radius=10, height=50)
+        status_card.grid(row=0, column=0, sticky="ew", padx=15, pady=(12, 5))
 
-        self.agent_bar = ctk.CTkFrame(status_bar, fg_color="transparent")
-        self.agent_bar.pack(fill="x", padx=12, pady=8)
+        self._agent_bar = ctk.CTkFrame(status_card, fg_color="transparent")
+        self._agent_bar.pack(fill="x", padx=12, pady=8)
 
         ctk.CTkLabel(
-            self.agent_bar, text="Agents:",
+            self._agent_bar, text="Agents:",
             font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
             text_color=COLORS["text_secondary"],
         ).pack(side="left", padx=(0, 8))
 
-        # Agent dots get built dynamically by _rebuild_agent_dots()
         self._rebuild_agent_dots()
 
         # ── Output panel ────────────────────────────────────
         self.output = ctk.CTkTextbox(
-            main, font=("Consolas", FONT_SIZES["body"]),
+            page, font=("Consolas", FONT_SIZES["body"]),
             fg_color=COLORS["bg_input"],
             text_color=COLORS["text_primary"],
             border_color=COLORS["border"],
@@ -330,7 +199,7 @@ class SwarmApp(ctk.CTk):
         self.output.grid(row=1, column=0, sticky="nsew", padx=15, pady=5)
         self.output.configure(state="disabled")
 
-        # Configure text tags for coloured output
+        # Text tags for coloured output
         try:
             tb = self.output._textbox
             tb.tag_configure("agent_header",
@@ -353,24 +222,21 @@ class SwarmApp(ctk.CTk):
         # Welcome message
         self._append_output(
             "🤖 MiniGrok Swarm — Ready\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "1. Paste your Grok API key in the sidebar and click Save\n"
-            "2. Choose model, tier, and safety level\n"
-            "3. (Optional) Attach context files\n"
-            "4. Type your task below and hit Run Swarm!\n\n"
-            "Agents run in TRUE parallel — all working simultaneously.\n"
-            "A Verifier agent synthesises the final answer.\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "1. Go to 🔑 API Keys tab → paste at least one Grok API key\n"
+            "2. Go to ⚙️ Settings tab → choose model, tier, safety level\n"
+            "3. Come back here → type your task → hit 🚀 Run Swarm\n\n"
+            "Tip: Add one key per agent for maximum rate-limit splitting.\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
             tag="system",
         )
 
         # ── Input bar ───────────────────────────────────────
-        input_frame = ctk.CTkFrame(
-            main, fg_color=COLORS["bg_card"], corner_radius=10,
-        )
-        input_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(5, 12))
+        input_card = ctk.CTkFrame(page, fg_color=COLORS["bg_card"],
+                                  corner_radius=10)
+        input_card.grid(row=2, column=0, sticky="ew", padx=15, pady=(5, 12))
 
-        input_inner = ctk.CTkFrame(input_frame, fg_color="transparent")
+        input_inner = ctk.CTkFrame(input_card, fg_color="transparent")
         input_inner.pack(fill="x", padx=12, pady=10)
 
         self.task_input = ctk.CTkTextbox(
@@ -390,146 +256,752 @@ class SwarmApp(ctk.CTk):
 
         self.btn_run = ActionButton(
             btn_col, text="🚀 Run Swarm",
-            command=self._run_swarm, style="success", width=130,
-        )
+            command=self._run_swarm, style="success", width=140)
         self.btn_run.pack(pady=(0, 4))
-        Tooltip(self.btn_run, "Launch all agents in parallel on your task")
 
         self.btn_stop = ActionButton(
             btn_col, text="⏹ Stop",
-            command=self._stop_swarm, style="danger", width=130,
-        )
+            command=self._stop_swarm, style="danger", width=140)
         self.btn_stop.pack()
         self.btn_stop.configure(state="disabled")
 
-        # Counter
-        self.counter_label = ctk.CTkLabel(
-            input_frame, text="",
+        # Bottom info row
+        info_row = ctk.CTkFrame(input_card, fg_color="transparent")
+        info_row.pack(fill="x", padx=12, pady=(0, 6))
+
+        self._counter_label = ctk.CTkLabel(
+            info_row, text="",
             font=(FONT_FAMILY, FONT_SIZES["tiny"]),
             text_color=COLORS["text_muted"],
         )
-        self.counter_label.pack(padx=12, pady=(0, 6), anchor="w")
+        self._counter_label.pack(side="left")
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # HELPERS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _section_label(self, parent, text):
-        """Small uppercase section header for the sidebar."""
-        ctk.CTkLabel(
-            parent, text=f"  {text}",
-            font=(FONT_FAMILY, FONT_SIZES["tiny"], "bold"),
+        self._ctx_info_label = ctk.CTkLabel(
+            info_row, text="",
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
             text_color=COLORS["text_muted"],
-        ).pack(anchor="w", padx=5, pady=(12, 3))
-
-    def _get_tier_key(self) -> str:
-        """Extract tier key from the dropdown text."""
-        val = self.tier_menu.get()
-        if val.startswith("minimum"):
-            return "minimum"
-        elif val.startswith("full"):
-            return "full"
-        return "medium"
-
-    def _get_safety_key(self) -> str:
-        """Extract safety key from the dropdown text."""
-        val = self.safety_menu.get()
-        if "Read-Only" in val:
-            return "read_only"
-        elif "Full Auto" in val:
-            return "full_auto"
-        return "confirmed"
+        )
+        self._ctx_info_label.pack(side="right")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # API KEYS
+    # PAGE 2 — 🔑 API KEYS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _build_keys_page(self):
+        page = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"],
+                            corner_radius=0)
+        self._pages["keys"] = page
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=20, pady=15)
+
+        # Header
+        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            hdr, text="🔑  API Keys",
+            font=(FONT_FAMILY, FONT_SIZES["title"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            hdr,
+            text="Add up to 8 xAI keys — one per agent for max rate-limit distribution",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(15, 0))
+
+        # ── Key slots card ──────────────────────────────────
+        self._key_entries: list[ctk.CTkEntry] = []
+        self._key_status_labels: list[ctk.CTkLabel] = []
+        self._keys_visible = False
+
+        keys_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                 corner_radius=12)
+        keys_card.pack(fill="x", pady=(0, 10))
+
+        for i in range(MAX_API_KEYS):
+            row = ctk.CTkFrame(keys_card, fg_color="transparent")
+            row.pack(fill="x", padx=15, pady=(10 if i == 0 else 3, 3))
+
+            # Label with role hint
+            role_hint = ""
+            tier = self._settings.get("tier", "medium")
+            roles = AGENT_ROLES.get(tier, AGENT_ROLES["medium"])
+            if i < len(roles):
+                role_hint = f"  →  {roles[i][0]}"
+
+            ctk.CTkLabel(
+                row, text=f"Key {i + 1}{role_hint}",
+                font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
+                text_color=COLORS["text_secondary"],
+                width=200, anchor="w",
+            ).pack(side="left")
+
+            # Entry (masked)
+            entry = ctk.CTkEntry(
+                row, show="●",
+                font=(FONT_FAMILY, FONT_SIZES["body"]),
+                fg_color=COLORS["bg_input"],
+                text_color=COLORS["text_primary"],
+                border_color=COLORS["border"],
+                border_width=1, corner_radius=8, height=34,
+            )
+            entry.pack(side="left", fill="x", expand=True, padx=(5, 8))
+            self._key_entries.append(entry)
+
+            # Status indicator
+            status_lbl = ctk.CTkLabel(
+                row, text="  ○  empty",
+                font=(FONT_FAMILY, FONT_SIZES["small"]),
+                text_color=COLORS["text_muted"],
+                width=100, anchor="w",
+            )
+            status_lbl.pack(side="left")
+            self._key_status_labels.append(status_lbl)
+
+        # ── Button row ──────────────────────────────────────
+        btn_row = ctk.CTkFrame(keys_card, fg_color="transparent")
+        btn_row.pack(fill="x", padx=15, pady=(10, 15))
+
+        ActionButton(
+            btn_row, text="💾  Save All Keys",
+            command=self._save_keys, style="success", width=160,
+        ).pack(side="left", padx=(0, 8))
+
+        ActionButton(
+            btn_row, text="🔌  Test All",
+            command=self._test_all_keys, style="primary", width=120,
+        ).pack(side="left", padx=(0, 8))
+
+        self._show_hide_btn = ActionButton(
+            btn_row, text="👁  Show Keys",
+            command=self._toggle_key_vis, style="secondary", width=130,
+        )
+        self._show_hide_btn.pack(side="left", padx=(0, 8))
+
+        ActionButton(
+            btn_row, text="🗑  Clear Empty",
+            command=self._compact_keys, style="secondary", width=130,
+        ).pack(side="left")
+
+        # Summary label
+        self._keys_summary = ctk.CTkLabel(
+            scroll, text="",
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._keys_summary.pack(anchor="w", pady=(5, 0))
+
+        # ── Info card ───────────────────────────────────────
+        info_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                 corner_radius=12)
+        info_card.pack(fill="x", pady=(10, 0))
+
+        info_text = (
+            "💡  How API key distribution works:\n\n"
+            "• Each parallel agent gets assigned a key round-robin\n"
+            "• Key 1 → Agent 1 (Researcher),   "
+            "Key 2 → Agent 2 (Planner),   etc.\n"
+            "• If you have fewer keys than agents, keys are reused "
+            "(still works fine)\n"
+            "• More unique keys = less rate-limiting = faster swarm runs\n"
+            "• The Verifier agent always uses Key 1\n\n"
+            "Get keys from:  console.x.ai  →  API Keys  →  Create API Key"
+        )
+        ctk.CTkLabel(
+            info_card, text=info_text,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_secondary"],
+            justify="left", anchor="w",
+        ).pack(padx=20, pady=15, anchor="w")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PAGE 3 — ⚙️ SETTINGS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _build_settings_page(self):
+        page = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"],
+                            corner_radius=0)
+        self._pages["settings"] = page
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=20, pady=15)
+
+        ctk.CTkLabel(
+            scroll, text="⚙️  Settings",
+            font=(FONT_FAMILY, FONT_SIZES["title"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(0, 15))
+
+        # ────── Model & Agent Configuration ─────────────────
+        cfg_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                corner_radius=12)
+        cfg_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            cfg_card, text="🤖  Model & Agent Configuration",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 10))
+
+        cfg = ctk.CTkFrame(cfg_card, fg_color="transparent")
+        cfg.pack(fill="x", padx=20, pady=(0, 15))
+        cfg.grid_columnconfigure(1, weight=1)
+
+        # Model selector
+        ctk.CTkLabel(
+            cfg, text="Model:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=0, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.model_menu = ctk.CTkOptionMenu(
+            cfg, values=GROK_MODELS,
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=350, height=34,
+            command=lambda _: self._update_nav_status(),
+        )
+        self.model_menu.grid(row=0, column=1, sticky="w", pady=6)
+
+        ctk.CTkLabel(
+            cfg,
+            text=("grok-4-0709 = most capable  |  "
+                  "grok-4-fast = balanced  |  grok-3-mini = cheapest"),
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_muted"],
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        # Tier selector
+        ctk.CTkLabel(
+            cfg, text="Agent Tier:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=2, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.tier_menu = ctk.CTkOptionMenu(
+            cfg,
+            values=["minimum (2 agents)",
+                    "medium (4 agents)",
+                    "full (8 agents)"],
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=350, height=34,
+            command=self._on_tier_change,
+        )
+        self.tier_menu.grid(row=2, column=1, sticky="w", pady=6)
+
+        self._tier_detail = ctk.CTkLabel(
+            cfg, text="",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+            justify="left",
+        )
+        self._tier_detail.grid(row=3, column=0, columnspan=2,
+                               sticky="w", pady=(0, 6))
+
+        # ────── Safety & Tool Access ────────────────────────
+        safety_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                   corner_radius=12)
+        safety_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            safety_card, text="🛡️  Safety & Tool Access",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 10))
+
+        safety_inner = ctk.CTkFrame(safety_card, fg_color="transparent")
+        safety_inner.pack(fill="x", padx=20, pady=(0, 15))
+
+        self.safety_menu = ctk.CTkOptionMenu(
+            safety_inner,
+            values=list(SAFETY_LEVELS.values()),
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=450, height=34,
+            command=self._on_safety_change,
+        )
+        self.safety_menu.pack(anchor="w", pady=(0, 8))
+
+        ctk.CTkLabel(
+            safety_inner,
+            text=(
+                "🔒 Read-Only:  Agents can only take screenshots, "
+                "OCR, read files, list dirs\n"
+                "⚠️  Confirmed:  Write/execute tools show a confirmation "
+                "dialog — you approve each one\n"
+                "🔓 Full Auto:   No confirmation — agents execute "
+                "all tools freely (dangerous!)"
+            ),
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+            justify="left",
+        ).pack(anchor="w")
+
+        # ────── Swarm Behaviour ─────────────────────────────
+        behav_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                  corner_radius=12)
+        behav_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            behav_card, text="🧠  Swarm Behaviour",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 10))
+
+        behav = ctk.CTkFrame(behav_card, fg_color="transparent")
+        behav.pack(fill="x", padx=20, pady=(0, 15))
+        behav.grid_columnconfigure(1, weight=1)
+
+        # Max tool rounds
+        ctk.CTkLabel(
+            behav, text="Max Tool Rounds:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=0, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.tool_rounds_slider = ctk.CTkSlider(
+            behav, from_=1, to=15, number_of_steps=14,
+            fg_color=COLORS["bg_input"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=300,
+            command=self._on_tool_rounds_change,
+        )
+        self.tool_rounds_slider.grid(row=0, column=1, sticky="w", pady=6)
+
+        self._tool_rounds_label = ctk.CTkLabel(
+            behav, text="5",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["accent"], width=30,
+        )
+        self._tool_rounds_label.grid(row=0, column=2, padx=(10, 0), pady=6)
+
+        ctk.CTkLabel(
+            behav,
+            text=("How many times each agent can call PC tools per run. "
+                  "Higher = more thorough but slower."),
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_muted"],
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+        # Request timeout
+        ctk.CTkLabel(
+            behav, text="Request Timeout:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=2, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.timeout_slider = ctk.CTkSlider(
+            behav, from_=30, to=600, number_of_steps=19,
+            fg_color=COLORS["bg_input"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=300,
+            command=self._on_timeout_change,
+        )
+        self.timeout_slider.grid(row=2, column=1, sticky="w", pady=6)
+
+        self._timeout_label = ctk.CTkLabel(
+            behav, text="180s",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["accent"], width=45,
+        )
+        self._timeout_label.grid(row=2, column=2, padx=(10, 0), pady=6)
+
+        # ────── Context Files ───────────────────────────────
+        ctx_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                corner_radius=12)
+        ctx_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            ctx_card, text="📎  Context Files",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 5))
+
+        ctk.CTkLabel(
+            ctx_card,
+            text=("Attach files to include as context for all agents "
+                  "(code, docs, data, etc.)"),
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=20, pady=(0, 8))
+
+        ctx_btns = ctk.CTkFrame(ctx_card, fg_color="transparent")
+        ctx_btns.pack(fill="x", padx=20, pady=(0, 5))
+
+        ActionButton(
+            ctx_btns, text="+ Add Files",
+            command=self._add_context_files, style="primary", width=130,
+        ).pack(side="left", padx=(0, 8))
+
+        ActionButton(
+            ctx_btns, text="🗑 Clear All",
+            command=self._clear_context, style="danger", width=110,
+        ).pack(side="left")
+
+        self._ctx_list_frame = ctk.CTkScrollableFrame(
+            ctx_card, fg_color="transparent", height=100)
+        self._ctx_list_frame.pack(fill="x", padx=20, pady=(0, 5))
+
+        self._ctx_count_label = ctk.CTkLabel(
+            ctx_card, text="No files attached",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._ctx_count_label.pack(anchor="w", padx=20, pady=(0, 15))
+
+        # ────── Appearance ──────────────────────────────────
+        appear_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                   corner_radius=12)
+        appear_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            appear_card, text="🎨  Appearance",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 10))
+
+        appear = ctk.CTkFrame(appear_card, fg_color="transparent")
+        appear.pack(fill="x", padx=20, pady=(0, 15))
+        appear.grid_columnconfigure(1, weight=1)
+
+        # Opacity slider
+        ctk.CTkLabel(
+            appear, text="Window Opacity:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=0, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.opacity_slider = ctk.CTkSlider(
+            appear, from_=0.5, to=1.0, number_of_steps=10,
+            fg_color=COLORS["bg_input"],
+            progress_color=COLORS["accent"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=300,
+            command=self._on_opacity_change,
+        )
+        self.opacity_slider.grid(row=0, column=1, sticky="w", pady=6)
+
+        self._opacity_label = ctk.CTkLabel(
+            appear, text="97%",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["accent"], width=40,
+        )
+        self._opacity_label.grid(row=0, column=2, padx=(10, 0), pady=6)
+
+        # Always on top checkbox
+        self._aot_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            appear, text="Always on top",
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            text_color=COLORS["text_secondary"],
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            variable=self._aot_var,
+            command=self._on_aot_change,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=6)
+
+        # ────── Save All ────────────────────────────────────
+        save_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        save_row.pack(fill="x", pady=(5, 20))
+
+        ActionButton(
+            save_row, text="💾  Save All Settings",
+            command=self._save_all_settings, style="success", width=200,
+        ).pack(side="left")
+
+        self._settings_status = ctk.CTkLabel(
+            save_row, text="",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._settings_status.pack(side="left", padx=(15, 0))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # API KEY LOGIC
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _save_keys(self):
-        self._settings["grok_api_key_1"] = self.key1_entry.get().strip()
-        self._settings["grok_api_key_2"] = self.key2_entry.get().strip()
+        keys = [e.get().strip() for e in self._key_entries]
+        self._settings["api_keys"] = keys
         save_settings(self._settings)
-        self.conn_label.configure(
-            text="Keys saved ✓", text_color=COLORS["accent_green"],
+        self._update_key_statuses()
+        n = sum(1 for k in keys if k)
+        self._keys_summary.configure(
+            text=f"✅ {n} key{'s' if n != 1 else ''} saved",
+            text_color=COLORS["accent_green"],
         )
-        self.after(500, self._check_connection)
+        self._update_nav_status()
 
-    def _toggle_key_vis(self):
-        self._keys_visible = not self._keys_visible
-        show = "" if self._keys_visible else "●"
-        self.key1_entry.configure(show=show)
-        self.key2_entry.configure(show=show)
-        self._key_toggle_btn.configure(
-            text="🙈" if self._keys_visible else "👁",
-        )
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # CONNECTION
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _check_connection(self):
-        key = self.key1_entry.get().strip()
-        if not key:
-            self.conn_label.configure(
-                text="No API key", text_color=COLORS["text_muted"],
-            )
-            return
-
-        self.conn_label.configure(
-            text="Testing connection...", text_color=COLORS["text_muted"],
-        )
+    def _test_all_keys(self):
+        self._keys_summary.configure(
+            text="⏳ Testing keys...", text_color=COLORS["text_muted"])
 
         def _bg():
-            ok, msg = test_connection(key)
-            models = list_grok_models(key) if ok else []
+            results = []
+            for i, entry in enumerate(self._key_entries):
+                key = entry.get().strip()
+                if not key:
+                    results.append((i, None, ""))
+                    continue
+                ok, msg = test_connection(key)
+                results.append((i, ok, msg))
 
             def _done():
-                if ok:
-                    self.conn_label.configure(
-                        text=f"✅ Connected — {msg}",
-                        text_color=COLORS["accent_green"],
-                    )
+                good = 0
+                for idx, ok, msg in results:
+                    lbl = self._key_status_labels[idx]
+                    if ok is None:
+                        lbl.configure(text="  ○  empty",
+                                      text_color=COLORS["text_muted"])
+                    elif ok:
+                        lbl.configure(text="  ✅ valid",
+                                      text_color=COLORS["accent_green"])
+                        good += 1
+                    else:
+                        lbl.configure(text="  ❌ invalid",
+                                      text_color=COLORS["error"])
+
+                self._keys_summary.configure(
+                    text=f"Test complete: {good} valid "
+                         f"key{'s' if good != 1 else ''}",
+                    text_color=(COLORS["accent_green"]
+                                if good > 0 else COLORS["error"]),
+                )
+                self._update_nav_status()
+
+                # Refresh model list from first valid key
+                first_key = next(
+                    (e.get().strip() for e in self._key_entries
+                     if e.get().strip()), "")
+                if first_key:
+                    models = list_grok_models(first_key)
                     if models:
                         self.model_menu.configure(values=models)
                         pref = self._settings.get("model", DEFAULT_MODEL)
                         if pref in models:
                             self.model_menu.set(pref)
-                        elif models:
-                            self.model_menu.set(models[0])
-                else:
-                    self.conn_label.configure(
-                        text=f"❌ {msg}", text_color=COLORS["error"],
-                    )
+
             self.after(0, _done)
 
         threading.Thread(target=_bg, daemon=True).start()
 
+    def _toggle_key_vis(self):
+        self._keys_visible = not self._keys_visible
+        show_char = "" if self._keys_visible else "●"
+        for e in self._key_entries:
+            e.configure(show=show_char)
+        self._show_hide_btn.configure(
+            text="🙈  Hide Keys" if self._keys_visible
+            else "👁  Show Keys",
+        )
+
+    def _compact_keys(self):
+        keys = [e.get().strip() for e in self._key_entries]
+        filled = [k for k in keys if k]
+        padded = filled + [""] * (MAX_API_KEYS - len(filled))
+        for i, e in enumerate(self._key_entries):
+            e.delete(0, "end")
+            if padded[i]:
+                e.insert(0, padded[i])
+        self._update_key_statuses()
+
+    def _update_key_statuses(self):
+        for i, entry in enumerate(self._key_entries):
+            lbl = self._key_status_labels[i]
+            if entry.get().strip():
+                lbl.configure(text="  ●  set",
+                              text_color=COLORS["accent_yellow"])
+            else:
+                lbl.configure(text="  ○  empty",
+                              text_color=COLORS["text_muted"])
+
+    def _auto_check_keys(self):
+        self._update_key_statuses()
+        self._update_nav_status()
+        # Auto-test first key in background
+        keys = [e.get().strip() for e in self._key_entries]
+        first_key = next((k for k in keys if k), "")
+        if not first_key:
+            return
+
+        def _bg():
+            ok, msg = test_connection(first_key)
+            models = list_grok_models(first_key) if ok else []
+
+            def _done():
+                if ok:
+                    for i, e in enumerate(self._key_entries):
+                        if e.get().strip() == first_key:
+                            self._key_status_labels[i].configure(
+                                text="  ✅ valid",
+                                text_color=COLORS["accent_green"],
+                            )
+                            break
+                    self._update_nav_status()
+                    if models:
+                        self.model_menu.configure(values=models)
+                        pref = self._settings.get("model", DEFAULT_MODEL)
+                        if pref in models:
+                            self.model_menu.set(pref)
+            self.after(0, _done)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _update_nav_status(self):
+        keys = self._get_active_keys()
+        n_keys = len(keys)
+        tier = self._get_tier_key()
+        n_agents = len(AGENT_ROLES.get(tier, []))
+        model = (self.model_menu.get()
+                 if hasattr(self, "model_menu") else "—")
+        self._nav_status.configure(
+            text=f"🔑 {n_keys} keys  •  "
+                 f"👥 {n_agents} agents  •  🤖 {model}",
+        )
+
+    def _get_active_keys(self) -> list[str]:
+        return [e.get().strip()
+                for e in self._key_entries if e.get().strip()]
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # TIER / SAFETY
+    # SETTINGS LOGIC
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _on_tier_change(self, _value=None):
+    def _get_tier_key(self) -> str:
+        val = (self.tier_menu.get()
+               if hasattr(self, "tier_menu") else "medium")
+        if val.startswith("minimum"):
+            return "minimum"
+        if val.startswith("full"):
+            return "full"
+        return "medium"
+
+    def _get_safety_key(self) -> str:
+        val = (self.safety_menu.get()
+               if hasattr(self, "safety_menu") else "confirmed")
+        if "Read-Only" in val:
+            return "read_only"
+        if "Full Auto" in val:
+            return "full_auto"
+        return "confirmed"
+
+    def _on_tier_change(self, _v=None):
         self._rebuild_agent_dots()
-        self._save_config()
+        self._update_tier_detail()
+        self._update_nav_status()
 
-    def _on_safety_change(self, _value=None):
-        key = self._get_safety_key()
-        SwarmTools.safety_level = key
-        self._save_config()
+    def _update_tier_detail(self):
+        tier = self._get_tier_key()
+        roles = AGENT_ROLES.get(tier, [])
+        names = ", ".join(r[0] for r in roles)
+        self._tier_detail.configure(text=f"Agents: {names}  +  ✅ Verifier")
 
-    def _save_config(self):
+    def _on_safety_change(self, _v=None):
+        SwarmTools.safety_level = self._get_safety_key()
+
+    def _on_tool_rounds_change(self, value):
+        self._tool_rounds_label.configure(text=str(int(value)))
+
+    def _on_timeout_change(self, value):
+        self._timeout_label.configure(text=f"{int(value)}s")
+
+    def _on_opacity_change(self, value):
+        v = round(value, 2)
+        self._opacity_label.configure(text=f"{int(v * 100)}%")
+        self.attributes("-alpha", v)
+
+    def _on_aot_change(self):
+        self.attributes("-topmost", self._aot_var.get())
+
+    def _save_all_settings(self):
         self._settings["model"] = self.model_menu.get()
         self._settings["tier"] = self._get_tier_key()
         self._settings["safety_level"] = self._get_safety_key()
+        self._settings["max_tool_rounds"] = int(self.tool_rounds_slider.get())
+        self._settings["request_timeout"] = int(self.timeout_slider.get())
+        self._settings["window_opacity"] = round(self.opacity_slider.get(), 2)
+        self._settings["always_on_top"] = self._aot_var.get()
+        self._settings["api_keys"] = [e.get().strip()
+                                      for e in self._key_entries]
         save_settings(self._settings)
+        self._settings_status.configure(
+            text="✅ Settings saved!",
+            text_color=COLORS["accent_green"],
+        )
+        self._update_nav_status()
+        self.after(3000, lambda: self._settings_status.configure(text=""))
+
+    def _load_settings_to_ui(self):
+        s = self._settings
+
+        # Keys
+        keys = s.get("api_keys", [""] * MAX_API_KEYS)
+        for i, entry in enumerate(self._key_entries):
+            entry.delete(0, "end")
+            if i < len(keys) and keys[i]:
+                entry.insert(0, keys[i])
+
+        # Model
+        model = s.get("model", DEFAULT_MODEL)
+        if model in GROK_MODELS:
+            self.model_menu.set(model)
+
+        # Tier
+        tier = s.get("tier", "medium")
+        tier_map = {
+            "minimum": "minimum (2 agents)",
+            "medium":  "medium (4 agents)",
+            "full":    "full (8 agents)",
+        }
+        self.tier_menu.set(tier_map.get(tier, tier_map["medium"]))
+        self._rebuild_agent_dots()
+        self._update_tier_detail()
+
+        # Safety
+        safety = s.get("safety_level", "confirmed")
+        self.safety_menu.set(
+            SAFETY_LEVELS.get(safety, SAFETY_LEVELS["confirmed"]))
+        SwarmTools.safety_level = safety
+
+        # Behaviour sliders
+        self.tool_rounds_slider.set(s.get("max_tool_rounds", 5))
+        self._tool_rounds_label.configure(
+            text=str(s.get("max_tool_rounds", 5)))
+        self.timeout_slider.set(s.get("request_timeout", 180))
+        self._timeout_label.configure(
+            text=f"{s.get('request_timeout', 180)}s")
+
+        # Appearance
+        opacity = s.get("window_opacity", 0.97)
+        self.opacity_slider.set(opacity)
+        self._opacity_label.configure(text=f"{int(opacity * 100)}%")
+        self.attributes("-alpha", opacity)
+
+        aot = s.get("always_on_top", False)
+        self._aot_var.set(aot)
+        self.attributes("-topmost", aot)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # AGENT STATUS DOTS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _rebuild_agent_dots(self):
-        """Recreate agent status indicators for the current tier."""
-        # Clear existing dots
-        for w in list(self.agent_bar.winfo_children()):
+        for w in list(self._agent_bar.winfo_children()):
             if isinstance(w, ctk.CTkLabel) and w.cget("text") != "Agents:":
                 w.destroy()
         self._agent_dots.clear()
@@ -539,26 +1011,23 @@ class SwarmApp(ctk.CTk):
 
         for role_name, _ in roles:
             dot = ctk.CTkLabel(
-                self.agent_bar,
-                text=f"● {role_name}",
+                self._agent_bar, text=f"● {role_name}",
                 font=(FONT_FAMILY, FONT_SIZES["small"]),
                 text_color=COLORS["text_muted"],
             )
             dot.pack(side="left", padx=(0, 10))
             self._agent_dots[role_name] = dot
 
-        # Verifier (always present)
+        # Verifier dot
         vdot = ctk.CTkLabel(
-            self.agent_bar,
-            text="● ✅ Verifier",
+            self._agent_bar, text="● ✅ Verifier",
             font=(FONT_FAMILY, FONT_SIZES["small"]),
             text_color=COLORS["text_muted"],
         )
         vdot.pack(side="left", padx=(0, 10))
         self._agent_dots["✅ Verifier"] = vdot
 
-    def _update_agent_dot(self, role, status):
-        """Update an agent's dot colour based on status."""
+    def _update_agent_dot(self, role: str, status: str):
         def _ui():
             dot = self._agent_dots.get(role)
             if not dot:
@@ -590,14 +1059,14 @@ class SwarmApp(ctk.CTk):
         )
         for path in paths:
             if any(p == path for p, _ in self._context_files):
-                continue  # skip duplicates
+                continue
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()[:30000]   # cap per file
+                with open(path, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    content = f.read()[:30000]
                 self._context_files.append((path, content))
             except Exception:
                 continue
-
         self._refresh_context_list()
 
     def _clear_context(self):
@@ -605,31 +1074,31 @@ class SwarmApp(ctk.CTk):
         self._refresh_context_list()
 
     def _refresh_context_list(self):
-        for w in self.ctx_list_frame.winfo_children():
+        for w in self._ctx_list_frame.winfo_children():
             w.destroy()
 
         for path, content in self._context_files:
             name = os.path.basename(path)
             wc = len(content.split())
-            row = ctk.CTkFrame(self.ctx_list_frame, fg_color=COLORS["bg_card"],
-                               corner_radius=6)
+            row = ctk.CTkFrame(self._ctx_list_frame,
+                               fg_color=COLORS["bg_input"], corner_radius=6)
             row.pack(fill="x", pady=1)
-
             ctk.CTkLabel(
-                row, text=f"📄 {name[:30]}  ({wc:,}w)",
+                row, text=f"📄 {name[:40]}  ({wc:,}w)",
                 font=(FONT_FAMILY, FONT_SIZES["small"]),
                 text_color=COLORS["text_primary"], anchor="w",
-            ).pack(fill="x", padx=6, pady=3)
+            ).pack(fill="x", padx=8, pady=3)
 
         total = len(self._context_files)
         tw = sum(len(c.split()) for _, c in self._context_files)
-        self.ctx_count_label.configure(
-            text=f"{total} file{'s' if total != 1 else ''}  •  "
-                 f"{tw:,} words" if total else "No files attached",
+        txt = (f"{total} file{'s' if total != 1 else ''}  •  "
+               f"{tw:,} words") if total else "No files attached"
+        self._ctx_count_label.configure(text=txt)
+        self._ctx_info_label.configure(
+            text=f"📎 {total} context files" if total else "",
         )
 
     def _build_context_string(self) -> str:
-        """Concatenate all context files into one string for agents."""
         if not self._context_files:
             return ""
         parts = []
@@ -654,51 +1123,52 @@ class SwarmApp(ctk.CTk):
         if not task:
             return
 
-        key1 = self.key1_entry.get().strip()
-        if not key1:
+        keys = self._get_active_keys()
+        if not keys:
             self._append_output(
-                "\n⚠️  No API key! Paste your Grok key in the sidebar.\n",
+                "\n⚠️  No API keys! Go to the 🔑 API Keys tab "
+                "and add at least one.\n",
                 tag="error",
             )
+            self._switch_page("keys")
             return
 
-        # Clear + show task
+        self._switch_page("swarm")
         self.task_input.delete("1.0", "end")
-        self._append_output(f"\n{'━' * 50}\n", tag="system")
-        self._append_output(f"📝 TASK: {task}\n", tag="system")
+
         tier_key = self._get_tier_key()
         n_agents = len(AGENT_ROLES.get(tier_key, []))
+        model = self.model_menu.get()
+
+        self._append_output(f"\n{'━' * 65}\n", tag="system")
+        self._append_output(f"📝 TASK: {task}\n", tag="system")
         self._append_output(
-            f"⚙️  Model: {self.model_menu.get()}  •  "
-            f"Tier: {tier_key} ({n_agents} agents)  •  "
-            f"Safety: {self._get_safety_key()}\n",
+            f"⚙️  Model: {model}  •  Tier: {tier_key} ({n_agents} "
+            f"agents)  •  Safety: {self._get_safety_key()}"
+            f"  •  Keys: {len(keys)}\n",
             tag="system",
         )
-        self._append_output(f"{'━' * 50}\n\n", tag="system")
+        self._append_output(f"{'━' * 65}\n\n", tag="system")
 
         # Reset dots
         for dot in self._agent_dots.values():
             dot.configure(text_color=COLORS["text_muted"])
 
-        # Update safety level on tools
         SwarmTools.safety_level = self._get_safety_key()
-
-        # Build swarm
         self._running = True
         self.btn_run.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self._first_verifier_token = True
 
-        key2 = self.key2_entry.get().strip()
         context = self._build_context_string()
 
         self._swarm = MiniGrokSwarm(
-            api_key_1=key1,
-            api_key_2=key2,
-            model=self.model_menu.get(),
+            api_keys=keys,
+            model=model,
             tier=tier_key,
+            max_tool_rounds=int(self.tool_rounds_slider.get()),
+            timeout=int(self.timeout_slider.get()),
         )
-
         swarm = self._swarm
 
         def _bg():
@@ -721,18 +1191,20 @@ class SwarmApp(ctk.CTk):
 
                 if result["success"]:
                     self._append_output(
-                        f"\n\n{'━' * 50}\n"
+                        f"\n\n{'━' * 65}\n"
                         f"✅ DONE — {n} agents • {elapsed:.1f}s\n"
-                        f"{'━' * 50}\n",
+                        f"{'━' * 65}\n",
                         tag="system",
                     )
-                    self.counter_label.configure(
+                    out = result.get("final_output", "")
+                    self._counter_label.configure(
                         text=f"{n} agents  •  {elapsed:.1f}s  •  "
-                             f"{len(result.get('final_output', '').split())} words",
+                             f"{len(out.split())} words",
                     )
                 else:
                     self._append_output(
-                        f"\n\n❌ ERROR: {result.get('error', 'Unknown')}\n",
+                        f"\n\n❌ ERROR: "
+                        f"{result.get('error', 'Unknown')}\n",
                         tag="error",
                     )
             self.after(0, _done)
@@ -744,23 +1216,21 @@ class SwarmApp(ctk.CTk):
             self._swarm.cancel()
             self._append_output("\n⏹ Stopping swarm...\n", tag="system")
 
-    # ── Swarm callbacks (called from background threads) ────
-
-    def _on_agent_status(self, role, status):
+    def _on_agent_status(self, role: str, status: str):
         self._update_agent_dot(role, status)
         if "🔧" in status:
-            # Tool usage
             self.after(0, lambda: self._append_output(
                 f"  {role} → {status}\n", tag="tool",
             ))
 
-    def _on_agent_done(self, role, output):
+    def _on_agent_done(self, role: str, output: str):
         def _ui():
-            self._append_output(f"\n──── {role} ────\n", tag="agent_header")
+            self._append_output(f"\n──── {role} ────\n",
+                                tag="agent_header")
             self._append_output(f"{output}\n")
         self.after(0, _ui)
 
-    def _on_verifier_token(self, token):
+    def _on_verifier_token(self, token: str):
         def _ui():
             if self._first_verifier_token:
                 self._first_verifier_token = False
@@ -776,11 +1246,6 @@ class SwarmApp(ctk.CTk):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _confirm_tool_action(self, action: str) -> bool:
-        """Show a confirmation dialog from a background tool thread.
-
-        Uses threading.Event to block the tool thread while the user
-        decides in the GUI. The main thread stays responsive.
-        """
         result = [False]
         event = threading.Event()
 
@@ -795,14 +1260,12 @@ class SwarmApp(ctk.CTk):
         return result[0]
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # OUTPUT DISPLAY
+    # OUTPUT HELPERS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _append_output(self, text, tag=None):
-        """Append text to the output panel (optionally with a tag)."""
+    def _append_output(self, text: str, tag: str | None = None):
         self.output.configure(state="normal")
         if tag:
-            # Insert with tag
             start = self.output.index("end-1c")
             self.output.insert("end", text)
             end = self.output.index("end-1c")
@@ -814,42 +1277,3 @@ class SwarmApp(ctk.CTk):
             self.output.insert("end", text)
         self.output.configure(state="disabled")
         self.output.see("end")
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # SETTINGS PERSISTENCE
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _load_settings_to_ui(self):
-        """Populate all UI widgets from saved settings."""
-        s = self._settings
-
-        # Keys
-        self.key1_entry.delete(0, "end")
-        self.key1_entry.insert(0, s.get("grok_api_key_1", ""))
-        self.key2_entry.delete(0, "end")
-        self.key2_entry.insert(0, s.get("grok_api_key_2", ""))
-
-        # Model
-        model = s.get("model", DEFAULT_MODEL)
-        if model in GROK_MODELS:
-            self.model_menu.set(model)
-
-        # Tier
-        tier = s.get("tier", "medium")
-        tier_map = {
-            "minimum": "minimum (2 agents)",
-            "medium": "medium (4 agents)",
-            "full": "full (8 agents)",
-        }
-        self.tier_menu.set(tier_map.get(tier, tier_map["medium"]))
-        self._rebuild_agent_dots()
-
-        # Safety
-        safety = s.get("safety_level", "confirmed")
-        safety_labels = {
-            "read_only": SAFETY_LEVELS["read_only"],
-            "confirmed": SAFETY_LEVELS["confirmed"],
-            "full_auto": SAFETY_LEVELS["full_auto"],
-        }
-        self.safety_menu.set(safety_labels.get(safety, safety_labels["confirmed"]))
-        SwarmTools.safety_level = safety

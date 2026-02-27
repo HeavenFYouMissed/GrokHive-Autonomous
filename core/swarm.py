@@ -225,12 +225,18 @@ class MiniGrokSwarm:
       on_verifier_token(token_str)      — streaming verifier output
     """
 
-    def __init__(self, api_key_1, api_key_2="",
-                 model=DEFAULT_MODEL, tier="medium"):
-        self.api_key_1 = api_key_1
-        self.api_key_2 = api_key_2 or api_key_1   # fallback
+    def __init__(self, api_keys: list[str] | None = None,
+                 model=DEFAULT_MODEL, tier="medium",
+                 max_tool_rounds=5, timeout=180):
+        # Accept list of keys; filter out empty strings
+        keys = [k for k in (api_keys or []) if k.strip()]
+        if not keys:
+            raise ValueError("At least one API key is required")
+        self.api_keys = keys
         self.model = model
         self.tier = tier
+        self.max_tool_rounds = max_tool_rounds
+        self.timeout = timeout
         self.roles = AGENT_ROLES.get(tier, AGENT_ROLES["medium"])
         self._cancelled = False
 
@@ -248,7 +254,7 @@ class MiniGrokSwarm:
         self._cancelled = False
         t0 = time.time()
         tools = TOOL_SCHEMAS
-        keys = [self.api_key_1, self.api_key_2]
+        keys = self.api_keys
         agent_outputs: dict[str, str] = {}
 
         # ── Phase 1: Parallel agent execution ───────────────
@@ -275,6 +281,7 @@ class MiniGrokSwarm:
                     api_key=key,
                     tools=tools,
                     on_status=_tool_status,
+                    max_tool_rounds=self.max_tool_rounds,
                 )
             except Exception as e:
                 output = f"[{role_name} ERROR] {e}"
@@ -343,7 +350,7 @@ class MiniGrokSwarm:
         ]
 
         result = _call_grok(
-            verifier_messages, self.model, self.api_key_1,
+            verifier_messages, self.model, self.api_keys[0],
             stream=True, on_token=on_verifier_token,
         )
 

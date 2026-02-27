@@ -8,12 +8,16 @@ from config import DATA_DIR
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
 DEFAULTS = {
-    # Grok API
-    "grok_api_key_1": "",
-    "grok_api_key_2": "",          # optional, for rate-limit distribution
-    "model": "grok-3",
+    # Grok API keys (up to 8 — one per agent for max rate-limit distribution)
+    "api_keys": ["", "", "", "", "", "", "", ""],
+    "model": "grok-4-0709",
     "tier": "medium",
     "safety_level": "confirmed",
+
+    # Swarm behaviour
+    "max_tool_rounds": 5,
+    "request_timeout": 180,
+    "auto_save_logs": True,
 
     # Window
     "window_opacity": 0.97,

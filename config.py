@@ -15,6 +15,9 @@ MAX_API_KEYS = 8
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 GROK_MODELS_URL = "https://api.x.ai/v1/models"
 
+# ── Ollama (local LLM — used for uncensored verifier) ──────
+OLLAMA_API_URL = "http://localhost:11434"
+
 GROK_MODELS = [
     "grok-4-0709",
     "grok-4-fast-reasoning",

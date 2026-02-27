@@ -7,6 +7,7 @@ Three-tab layout:
   ⚙️ Settings  — Model, tier, safety, behaviour, appearance
 """
 import ctypes
+import json
 import os
 import threading
 import time
@@ -23,6 +24,7 @@ from gui.widgets import ActionButton, Tooltip, ConfirmDialog
 from core.settings import load_settings, save_settings
 from core.swarm import MiniGrokSwarm, list_grok_models, test_connection
 from core.tools import set_confirm_callback, SwarmTools, READ_ONLY
+from core.logger import ToolLogger
 
 
 # ── Windows 11 Mica titlebar ────────────────────────────────
@@ -78,10 +80,14 @@ class SwarmApp(ctk.CTk):
         self._build_swarm_page()
         self._build_keys_page()
         self._build_settings_page()
+        self._build_log_page()
         self._switch_page("swarm")
 
         # ─── Tool confirmation system ───────────────────────
         set_confirm_callback(self._confirm_tool_action)
+
+        # ─── Tool activity logger callback ──────────────────
+        ToolLogger.set_callback(self._on_log_entry)
 
         # ─── Populate UI from saved settings ────────────────
         self._load_settings_to_ui()
@@ -126,6 +132,7 @@ class SwarmApp(ctk.CTk):
             ("swarm",    "🚀  Swarm"),
             ("keys",     "🔑  API Keys"),
             ("settings", "⚙️  Settings"),
+            ("log",      "📋  Log"),
         ]
         for key, label in tabs:
             btn = ctk.CTkButton(
@@ -134,7 +141,7 @@ class SwarmApp(ctk.CTk):
                 fg_color="transparent",
                 hover_color=COLORS["bg_hover"],
                 text_color=COLORS["text_secondary"],
-                corner_radius=8, height=40, width=140,
+                corner_radius=8, height=40, width=125,
                 command=lambda k=key: self._switch_page(k),
             )
             btn.pack(side="left", padx=3, pady=8)
@@ -552,6 +559,92 @@ class SwarmApp(ctk.CTk):
             justify="left",
         ).pack(anchor="w")
 
+        # ────── Verifier Backend ────────────────────────────
+        verifier_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
+                                     corner_radius=12)
+        verifier_card.pack(fill="x", pady=(0, 12))
+
+        ctk.CTkLabel(
+            verifier_card, text="🧪  Verifier Backend",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=20, pady=(15, 10))
+
+        vf = ctk.CTkFrame(verifier_card, fg_color="transparent")
+        vf.pack(fill="x", padx=20, pady=(0, 15))
+        vf.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            vf, text="Backend:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=0, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.verifier_menu = ctk.CTkOptionMenu(
+            vf, values=["Ollama (Local)", "Grok (API)"],
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            width=350, height=34,
+        )
+        self.verifier_menu.grid(row=0, column=1, sticky="w", pady=6)
+
+        ctk.CTkLabel(
+            vf, text="Ollama Model:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=1, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.ollama_model_entry = ctk.CTkEntry(
+            vf, font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            text_color=COLORS["text_primary"],
+            border_color=COLORS["border"],
+            border_width=1, corner_radius=8, height=34, width=350,
+            placeholder_text="qwen3-vl:4b-instruct",
+        )
+        self.ollama_model_entry.grid(row=1, column=1, sticky="w", pady=6)
+
+        ctk.CTkLabel(
+            vf, text="Ollama URL:",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["text_secondary"],
+        ).grid(row=2, column=0, sticky="w", pady=6, padx=(0, 15))
+
+        self.ollama_url_entry = ctk.CTkEntry(
+            vf, font=(FONT_FAMILY, FONT_SIZES["body"]),
+            fg_color=COLORS["bg_input"],
+            text_color=COLORS["text_primary"],
+            border_color=COLORS["border"],
+            border_width=1, corner_radius=8, height=34, width=350,
+            placeholder_text="http://localhost:11434",
+        )
+        self.ollama_url_entry.grid(row=2, column=1, sticky="w", pady=6)
+
+        test_row = ctk.CTkFrame(vf, fg_color="transparent")
+        test_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        ActionButton(
+            test_row, text="🔌 Test Ollama",
+            command=self._test_ollama, style="primary", width=140,
+        ).pack(side="left", padx=(0, 10))
+
+        self._ollama_status = ctk.CTkLabel(
+            test_row, text="",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._ollama_status.pack(side="left")
+
+        ctk.CTkLabel(
+            vf,
+            text=("Ollama = local uncensored verifier (no content refusals)\n"
+                  "Grok = uses your API key (faster but may refuse some content)"),
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_muted"],
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
         # ────── Swarm Behaviour ─────────────────────────────
         behav_card = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"],
                                   corner_radius=12)
@@ -735,6 +828,170 @@ class SwarmApp(ctk.CTk):
             text_color=COLORS["text_muted"],
         )
         self._settings_status.pack(side="left", padx=(15, 0))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PAGE 4 — 📋 LOG
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _build_log_page(self):
+        page = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"],
+                            corner_radius=0)
+        self._pages["log"] = page
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        # ── Header bar ──────────────────────────────────────
+        hdr = ctk.CTkFrame(page, fg_color=COLORS["bg_card"],
+                           corner_radius=10, height=50)
+        hdr.grid(row=0, column=0, sticky="ew", padx=15, pady=(12, 5))
+
+        ctk.CTkLabel(
+            hdr, text="📋  Tool Activity Log",
+            font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(side="left", padx=15, pady=10)
+
+        self._log_count_label = ctk.CTkLabel(
+            hdr, text="0 entries",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_muted"],
+        )
+        self._log_count_label.pack(side="left", padx=(10, 0))
+
+        ActionButton(
+            hdr, text="💾 Export",
+            command=self._export_log, style="primary", width=100,
+        ).pack(side="right", padx=(5, 15), pady=10)
+
+        ActionButton(
+            hdr, text="🗑 Clear",
+            command=self._clear_log, style="danger", width=90,
+        ).pack(side="right", padx=5, pady=10)
+
+        # ── Log output textbox ──────────────────────────────
+        self._log_output = ctk.CTkTextbox(
+            page, font=("Consolas", FONT_SIZES["small"]),
+            fg_color=COLORS["bg_input"],
+            text_color=COLORS["text_primary"],
+            border_color=COLORS["border"],
+            border_width=1, corner_radius=10, wrap="word",
+        )
+        self._log_output.grid(row=1, column=0, sticky="nsew",
+                              padx=15, pady=(5, 12))
+        self._log_output.configure(state="disabled")
+
+        # Text tags
+        try:
+            tb = self._log_output._textbox
+            tb.tag_configure("log_success",
+                             foreground=COLORS["accent_green"])
+            tb.tag_configure("log_blocked",
+                             foreground=COLORS["error"])
+            tb.tag_configure("log_error",
+                             foreground=COLORS["accent_yellow"])
+            tb.tag_configure("log_tool",
+                             foreground=COLORS["accent"])
+        except Exception:
+            pass
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # LOG HELPERS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _on_log_entry(self, entry: dict):
+        """Callback from ToolLogger — append entry to log tab."""
+        text = ToolLogger.format_entry(entry) + "\n"
+        tag = None
+        if entry.get("blocked"):
+            tag = "log_blocked"
+        elif entry.get("success"):
+            tag = "log_success"
+        else:
+            tag = "log_error"
+
+        def _ui():
+            self._log_output.configure(state="normal")
+            if tag:
+                start = self._log_output.index("end-1c")
+                self._log_output.insert("end", text)
+                end = self._log_output.index("end-1c")
+                try:
+                    self._log_output._textbox.tag_add(tag, start, end)
+                except Exception:
+                    pass
+            else:
+                self._log_output.insert("end", text)
+            self._log_output.configure(state="disabled")
+            self._log_output.see("end")
+            self._log_count_label.configure(
+                text=f"{ToolLogger.entry_count()} entries")
+        self.after(0, _ui)
+
+    def _export_log(self):
+        path = tkfd.asksaveasfilename(
+            title="Export Tool Log",
+            defaultextension=".txt",
+            filetypes=[("Text file", "*.txt"), ("JSON", "*.json")],
+            initialfile=f"grokhive_log_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        if path:
+            if path.endswith(".json"):
+                ToolLogger.save_to_file(path)
+            else:
+                ToolLogger.export_readable(path)
+            self._append_output(
+                f"\n📋 Log exported → {path}\n", tag="system")
+
+    def _clear_log(self):
+        ToolLogger.clear()
+        self._log_output.configure(state="normal")
+        self._log_output.delete("1.0", "end")
+        self._log_output.configure(state="disabled")
+        self._log_count_label.configure(text="0 entries")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # OLLAMA TEST
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _test_ollama(self):
+        url = (self.ollama_url_entry.get().strip()
+               or "http://localhost:11434")
+        model = (self.ollama_model_entry.get().strip()
+                 or "qwen3-vl:4b-instruct")
+        self._ollama_status.configure(
+            text="⏳ Testing...", text_color=COLORS["text_muted"])
+
+        def _bg():
+            try:
+                import urllib.request as _ur
+                req = _ur.Request(f"{url}/api/tags")
+                resp = _ur.urlopen(req, timeout=5)
+                data = json.loads(resp.read().decode())
+                resp.close()
+                names = [m["name"] for m in data.get("models", [])]
+                found = model in names or any(
+                    model in n for n in names)
+
+                def _done():
+                    if found:
+                        self._ollama_status.configure(
+                            text=f"✅ Connected — {model} available",
+                            text_color=COLORS["accent_green"])
+                    else:
+                        short = ", ".join(names[:5])
+                        self._ollama_status.configure(
+                            text=f"⚠️ Connected but '{model}' "
+                                 f"not found. Available: {short}",
+                            text_color=COLORS["accent_yellow"])
+                self.after(0, _done)
+            except Exception as e:
+                def _err():
+                    self._ollama_status.configure(
+                        text=f"❌ {e}",
+                        text_color=COLORS["error"])
+                self.after(0, _err)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # API KEY LOGIC
@@ -943,6 +1200,16 @@ class SwarmApp(ctk.CTk):
         self._settings["always_on_top"] = self._aot_var.get()
         self._settings["api_keys"] = [e.get().strip()
                                       for e in self._key_entries]
+        # Verifier
+        vb = self.verifier_menu.get()
+        self._settings["verifier_backend"] = (
+            "ollama" if "Ollama" in vb else "grok")
+        self._settings["ollama_model"] = (
+            self.ollama_model_entry.get().strip()
+            or "qwen3-vl:4b-instruct")
+        self._settings["ollama_url"] = (
+            self.ollama_url_entry.get().strip()
+            or "http://localhost:11434")
         save_settings(self._settings)
         self._settings_status.configure(
             text="✅ Settings saved!",
@@ -1000,6 +1267,17 @@ class SwarmApp(ctk.CTk):
         aot = s.get("always_on_top", False)
         self._aot_var.set(aot)
         self.attributes("-topmost", aot)
+
+        # Verifier
+        vb = s.get("verifier_backend", "ollama")
+        self.verifier_menu.set(
+            "Ollama (Local)" if vb == "ollama" else "Grok (API)")
+        om = s.get("ollama_model", "qwen3-vl:4b-instruct")
+        self.ollama_model_entry.delete(0, "end")
+        self.ollama_model_entry.insert(0, om)
+        ou = s.get("ollama_url", "http://localhost:11434")
+        self.ollama_url_entry.delete(0, "end")
+        self.ollama_url_entry.insert(0, ou)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # AGENT STATUS DOTS
@@ -1153,6 +1431,13 @@ class SwarmApp(ctk.CTk):
             f"  •  Keys: {len(keys)}\n",
             tag="system",
         )
+        vb = self._settings.get("verifier_backend", "ollama")
+        vb_display = (f"Ollama ({self._settings.get('ollama_model', 'qwen3-vl:4b-instruct')})"
+                      if vb == "ollama" else "Grok API")
+        self._append_output(
+            f"🧪 Verifier: {vb_display}\n",
+            tag="system",
+        )
         self._append_output(f"{'━' * 65}\n\n", tag="system")
 
         # Reset dots
@@ -1174,6 +1459,12 @@ class SwarmApp(ctk.CTk):
             tier=tier_key,
             max_tool_rounds=int(self.tool_rounds_slider.get()),
             timeout=int(self.timeout_slider.get()),
+            verifier_backend=self._settings.get(
+                "verifier_backend", "ollama"),
+            ollama_model=self._settings.get(
+                "ollama_model", "qwen3-vl:4b-instruct"),
+            ollama_url=self._settings.get(
+                "ollama_url", "http://localhost:11434"),
         )
         swarm = self._swarm
 
@@ -1284,6 +1575,12 @@ class SwarmApp(ctk.CTk):
             tier=tier_key,
             max_tool_rounds=int(self.tool_rounds_slider.get()),
             timeout=int(self.timeout_slider.get()),
+            verifier_backend=self._settings.get(
+                "verifier_backend", "ollama"),
+            ollama_model=self._settings.get(
+                "ollama_model", "qwen3-vl:4b-instruct"),
+            ollama_url=self._settings.get(
+                "ollama_url", "http://localhost:11434"),
         )
         swarm = self._swarm
 

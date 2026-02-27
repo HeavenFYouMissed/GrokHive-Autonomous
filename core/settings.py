@@ -1,5 +1,5 @@
-"""
-Settings Manager — Load/save user preferences to JSON.
+﻿"""
+Settings Manager 鈥?Load/save user preferences to JSON.
 """
 import os
 import json
@@ -8,7 +8,7 @@ from config import DATA_DIR
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
 DEFAULTS = {
-    # Grok API keys (up to 8 — one per agent for max rate-limit distribution)
+    # Grok API keys (up to 8 鈥?one per agent for max rate-limit distribution)
     "api_keys": ["", "", "", "", "", "", "", ""],
     "model": "grok-4-0709",
     "tier": "medium",
@@ -22,6 +22,11 @@ DEFAULTS = {
     # Window
     "window_opacity": 0.97,
     "always_on_top": False,
+
+    # Verifier backend (Ollama = local uncensored, Grok = API)
+    "verifier_backend": "ollama",
+    "ollama_model": "qwen3-vl:4b-instruct",
+    "ollama_url": "http://localhost:11434",
 }
 
 

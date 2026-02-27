@@ -10,6 +10,7 @@ The GUI registers a confirmation callback via set_confirm_callback().
 Tool threads block on a threading.Event until the user responds.
 """
 import os
+import re
 import subprocess
 import json
 import threading
@@ -53,6 +54,44 @@ def _request_confirmation(action: str) -> bool:
         if _confirm_callback:
             return _confirm_callback(action)
     return False
+
+
+# ── PowerShell Blocklist (NEVER allow these) ───────────────
+
+_PS_BLOCKLIST = [
+    ("uninstall",               "Cannot uninstall software"),
+    ("remove-appxpackage",      "Cannot remove Windows apps"),
+    ("remove-windowsfeature",   "Cannot remove Windows features"),
+    ("remove-windowsoptionalfeature", "Cannot remove Windows features"),
+    ("format-volume",           "Cannot format drives"),
+    ("format c:",               "Cannot format drives"),
+    ("format d:",               "Cannot format drives"),
+    ("stop-computer",           "Cannot shut down computer"),
+    ("restart-computer",        "Cannot restart computer"),
+    ("shutdown",                "Cannot shut down computer"),
+    ("clear-recyclebin",        "Cannot clear recycle bin"),
+    ("bcdedit",                 "Cannot modify boot configuration"),
+    ("diskpart",                "Cannot modify disk partitions"),
+    ("reg delete",              "Cannot delete registry keys"),
+    ("set-executionpolicy unrestricted", "Cannot change execution policy"),
+    ("remove-item c:\\windows",  "Cannot delete Windows system files"),
+    ("remove-item c:\\program",  "Cannot delete Program Files"),
+    ("remove-item -recurse c:\\","Cannot recursively delete C: drive"),
+    ("del /s c:\\windows",       "Cannot delete Windows system files"),
+    ("rmdir /s c:\\windows",     "Cannot delete Windows system folders"),
+    ("system32",                "Cannot touch System32"),
+    ("new-service",             "Cannot create Windows services"),
+    ("remove-service",          "Cannot remove Windows services"),
+]
+
+
+def _check_powershell_blocklist(cmd: str) -> str | None:
+    """Return block reason if cmd matches blocklist, else None."""
+    cmd_lower = cmd.lower().replace("/", "\\").strip()
+    for pattern, reason in _PS_BLOCKLIST:
+        if pattern in cmd_lower:
+            return reason
+    return None
 
 
 # ── Tool implementations ───────────────────────────────────
@@ -131,6 +170,11 @@ class SwarmTools:
     @staticmethod
     def run_powershell(cmd):
         """Execute a PowerShell command."""
+        # ── Hard blocklist — NEVER allow these regardless of safety level ──
+        block_reason = _check_powershell_blocklist(cmd)
+        if block_reason:
+            return {"success": False, "error": f"BLOCKED: {block_reason}",
+                    "blocked": True, "block_reason": block_reason}
         if SwarmTools.safety_level == READ_ONLY:
             return {"success": False, "error": "Blocked — safety is Read-Only"}
         if SwarmTools.safety_level == CONFIRMED:
@@ -299,6 +343,21 @@ class SwarmTools:
             text = pytesseract.image_to_string(img).strip()
             return {"success": True, "text": text[:15000],
                     "region": f"{x},{y} {width}x{height}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def close_browser_tab():
+        """Close the current browser tab (Ctrl+W)."""
+        if not HAS_PYAUTOGUI:
+            return {"success": False, "error": "pyautogui not installed"}
+        if SwarmTools.safety_level == READ_ONLY:
+            return {"success": False, "error": "Blocked — safety is Read-Only"}
+        try:
+            pyautogui.hotkey('ctrl', 'w')
+            import time
+            time.sleep(0.3)
+            return {"success": True, "message": "Closed current browser tab"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -537,6 +596,14 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_browser_tab",
+            "description": "Close the current browser tab (Ctrl+W). Use after finishing with a webpage to keep things tidy.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -567,19 +634,30 @@ _TOOL_MAP = {
     "screenshot_region": lambda a: SwarmTools.screenshot_region(
                             a.get("x", 0), a.get("y", 0),
                             a.get("width", 800), a.get("height", 600)),
+    "close_browser_tab": lambda a: SwarmTools.close_browser_tab(),
 }
 
 
-def execute_tool(name: str, args: dict) -> dict:
+def execute_tool(name: str, args: dict, agent_role: str = "") -> dict:
     """Execute a tool by name. Returns a JSON-serialisable dict."""
+    from core.logger import ToolLogger
+
     func = _TOOL_MAP.get(name)
     if not func:
-        return {"success": False, "error": f"Unknown tool: {name}"}
+        result = {"success": False, "error": f"Unknown tool: {name}"}
+        ToolLogger.log(name, args, result, agent_role=agent_role)
+        return result
     try:
         result = func(args)
         # Ensure serialisable
         if isinstance(result, dict):
             result.pop("image", None)
+        blocked = result.get("blocked", False) if isinstance(result, dict) else False
+        block_reason = result.get("block_reason", "") if isinstance(result, dict) else ""
+        ToolLogger.log(name, args, result, agent_role=agent_role,
+                       blocked=blocked, block_reason=block_reason)
         return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        result = {"success": False, "error": str(e)}
+        ToolLogger.log(name, args, result, agent_role=agent_role)
+        return result

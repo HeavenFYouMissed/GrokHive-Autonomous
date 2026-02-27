@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 
-from config import GROK_API_URL, GROK_MODELS_URL, GROK_MODELS, AGENT_ROLES, DEFAULT_MODEL
+from config import GROK_API_URL, GROK_MODELS_URL, GROK_MODELS, AGENT_ROLES, DEFAULT_MODEL, OLLAMA_API_URL
 from core.tools import TOOL_SCHEMAS, execute_tool
 
 _SSL_CTX = ssl.create_default_context()
@@ -105,6 +105,62 @@ def _call_grok(messages, model, api_key, tools=None,
         return {"success": False, "error": f"Parse error: {e}\n{body[:500]}"}
 
 
+def _call_ollama(messages, model, base_url=None,
+                 stream=False, on_token=None):
+    """Call local Ollama model (used for uncensored verifier).
+
+    Ollama API: POST {base_url}/api/chat
+    """
+    base_url = (base_url or OLLAMA_API_URL).rstrip("/")
+    url = f"{base_url}/api/chat"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        resp = urllib.request.urlopen(req, timeout=300)
+    except Exception as e:
+        return {"success": False, "error": f"Ollama error: {e}"}
+
+    if stream and on_token:
+        full_text: list[str] = []
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    on_token(content)
+                    full_text.append(content)
+                if chunk.get("done"):
+                    break
+            except json.JSONDecodeError:
+                continue
+        resp.close()
+        return {"success": True, "reply": "".join(full_text)}
+
+    # Non-streaming
+    body = resp.read().decode("utf-8")
+    resp.close()
+    try:
+        data = json.loads(body)
+        content = data.get("message", {}).get("content", "")
+        return {"success": True, "reply": content}
+    except (json.JSONDecodeError, KeyError) as e:
+        return {"success": False, "error": f"Ollama parse error: {e}"}
+
+
 def list_grok_models(api_key: str) -> list[str]:
     """Fetch available models from the xAI API (fallback to static list)."""
     try:
@@ -159,13 +215,15 @@ def _run_agent(role_name, role_focus, task, context,
         "7. Repeat: screenshot → read → click → scroll → screenshot\n"
         "8. write_file('path', content) — save your findings\n\n"
         "You can also: type_text() into search bars, press_keys('ctrl,a') to select all,\n"
-        "press_keys('ctrl,c') to copy, get_clipboard() to read copied text.\n\n"
+        "press_keys('ctrl,c') to copy, get_clipboard() to read copied text.\n"
+        "close_browser_tab() — close tabs when done reading a page to keep things tidy.\n\n"
         "IMPORTANT:\n"
         "• You ARE the mouse and keyboard — navigate exactly like a person would\n"
         "• After opening a URL, ALWAYS wait() then ocr_screenshot() to see the page\n"
         "• Use screenshot coordinates to know WHERE to click\n"
         "• Save all research findings to files with write_file()\n"
         "• Be thorough — scroll through entire pages, follow links, dig deep\n"
+        "• Close browser tabs when done with a page using close_browser_tab()\n"
         "• NEVER visit guidedhacking.com (owner's paid subscription site)\n"
     )
 
@@ -206,7 +264,7 @@ def _run_agent(role_name, role_focus, task, context,
                 if on_status:
                     on_status(f"🔧 Using: {func_name}")
 
-                tool_result = execute_tool(func_name, func_args)
+                tool_result = execute_tool(func_name, func_args, agent_role=role_name)
 
                 messages.append({
                     "role": "tool",
@@ -244,7 +302,10 @@ class MiniGrokSwarm:
 
     def __init__(self, api_keys: list[str] | None = None,
                  model=DEFAULT_MODEL, tier="medium",
-                 max_tool_rounds=5, timeout=180):
+                 max_tool_rounds=5, timeout=180,
+                 verifier_backend="ollama",
+                 ollama_model="qwen3-vl:4b-instruct",
+                 ollama_url=None):
         # Accept list of keys; filter out empty strings
         keys = [k for k in (api_keys or []) if k.strip()]
         if not keys:
@@ -254,6 +315,9 @@ class MiniGrokSwarm:
         self.tier = tier
         self.max_tool_rounds = max_tool_rounds
         self.timeout = timeout
+        self.verifier_backend = verifier_backend
+        self.ollama_model = ollama_model
+        self.ollama_url = ollama_url or OLLAMA_API_URL
         self.roles = AGENT_ROLES.get(tier, AGENT_ROLES["medium"])
         self._cancelled = False
 
@@ -366,10 +430,18 @@ class MiniGrokSwarm:
             },
         ]
 
-        result = _call_grok(
-            verifier_messages, self.model, self.api_keys[0],
-            stream=True, on_token=on_verifier_token,
-        )
+        # Route to Ollama (local uncensored) or Grok (API)
+        if self.verifier_backend == "ollama":
+            result = _call_ollama(
+                verifier_messages, self.ollama_model,
+                self.ollama_url,
+                stream=True, on_token=on_verifier_token,
+            )
+        else:
+            result = _call_grok(
+                verifier_messages, self.model, self.api_keys[0],
+                stream=True, on_token=on_verifier_token,
+            )
 
         elapsed = time.time() - t0
 
